@@ -438,7 +438,7 @@ const getComments = async (
   };
 };
 
-const getUser = async (request: GetUserRequest): Promise<GetUserReponse> => {
+const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}/user/${request.apiId}/overview.json`;
