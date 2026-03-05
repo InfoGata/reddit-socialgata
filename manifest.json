@@ -4,5 +4,7 @@
   "version": "1.0.0",
   "description": "Browse Reddit feeds, communities, and comments",
   "script": "dist/index.js",
-  "options": "dist/options.html"
+  "options": "dist/options.html",
+  "updateUrl": "https://cdn.jsdelivr.net/gh/InfoGata/reddit-socialgata@latest/manifest.json",
+  "homepage": "https://github.com/InfoGata/reddit-socialgata"
 }
