@@ -236,9 +236,7 @@ const getBaseUrl = () => {
 };
 
 const getHeaders = (): HeadersInit => {
-  const headers: HeadersInit = {
-    Accept: "application/json",
-  };
+  const headers: HeadersInit = {};
   if (hasLogin()) {
     headers["Authorization"] = `Bearer ${accessToken}`;
   }
