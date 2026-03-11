@@ -1,0 +1,46 @@
+name: Purge jsdelivr Cache
+
+on:
+  push:
+    branches: [master]
+    paths: [manifest.json]
+
+jobs:
+  purge-jsdelivr-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: version
+        run: |
+          OLD_VERSION=$(git show HEAD~1:manifest.json | jq -r .version)
+          NEW_VERSION=$(jq -r .version manifest.json)
+          if [ "$OLD_VERSION" != "$NEW_VERSION" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Version changed: $OLD_VERSION -> $NEW_VERSION"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine CDN URLs to Purge
+        if: steps.version.outputs.changed == 'true'
+        id: purge_urls
+        run: |
+          baseUrl="https://cdn.jsdelivr.net/gh/${{ github.repository }}@latest"
+          urls="${baseUrl}/manifest.json"
+
+          for f in $(find dist -type f); do
+            urls+=",${baseUrl}/${f}"
+          done
+
+          echo "urls=${urls}" >> "$GITHUB_OUTPUT"
+
+      - name: Purge CDN Caches
+        if: steps.version.outputs.changed == 'true'
+        uses: egad13/purge-jsdelivr-cache@v1
+        with:
+          url: ${{ steps.purge_urls.outputs.urls }}
