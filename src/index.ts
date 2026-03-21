@@ -36,6 +36,17 @@ interface ListingMore {
   data: ListingMoreData;
 }
 
+interface ListingChildSubreddit {
+  kind: "t5";
+  data: {
+    display_name: string;
+    public_description: string;
+    subscribers: number;
+    url: string;
+    title: string;
+  };
+}
+
 interface ListingMoreData {
   count: number;
   parent_id: string;
@@ -454,6 +465,39 @@ const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   };
 };
 
+const getCommunities = async (
+  request: GetCommunitiesRequest
+): Promise<GetCommunitiesResponse> => {
+  const headers = getHeaders();
+  const baseUrl = getBaseUrl();
+  const url = new URL(`${baseUrl}/subreddits/popular.json`);
+  if (request?.pageInfo?.page) {
+    url.searchParams.append("after", String(request.pageInfo.page));
+  }
+
+  const response = await application.networkRequest(url.toString(), {
+    headers,
+  });
+  const json = await response.json();
+  const items =
+    json.data?.children
+      .filter((c: ListingChildSubreddit) => c.kind === "t5")
+      .map((c: ListingChildSubreddit) => ({
+        apiId: c.data.display_name,
+        name: c.data.display_name,
+        description: c.data.public_description,
+        originalUrl: `https://www.reddit.com${c.data.url}`,
+      })) ?? [];
+
+  return {
+    items,
+    pageInfo: {
+      nextPage: json.data?.after ?? undefined,
+      prevPage: json.data?.before ?? undefined,
+    },
+  };
+};
+
 const search = async (request: SearchRequest): Promise<SearchResponse> => {
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
@@ -583,6 +627,7 @@ const init = async () => {
 // Wire up plugin handlers
 application.onGetFeed = getFeed;
 application.onGetCommunity = getCommunity;
+application.onGetCommunities = getCommunities;
 application.onGetComments = getComments;
 application.onGetUser = getUser;
 application.onSearch = search;
