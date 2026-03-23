@@ -1,6 +1,5 @@
 import { MessageType, UiMessageType } from "./shared";
 
-const pluginName = "reddit";
 const REDDIT_API_BASE = "https://oauth.reddit.com";
 const REDDIT_PUBLIC_API_BASE = "https://www.reddit.com";
 const REDDIT_TOKEN_KEY = "reddit_access_token";
@@ -272,7 +271,6 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
     communityName: post.subreddit,
     communityApiId: post.subreddit,
     body: post.selftext,
-    pluginId: pluginName,
     thumbnailUrl:
       post.thumbnail === "self"
         ? undefined
@@ -290,7 +288,6 @@ const redditCommentToPost = (comment: ListingChildCommentData): Post => {
     body: comment.body,
     authorName: comment.author,
     authorApiId: comment.author,
-    pluginId: pluginName,
     comments:
       comment.replies?.data?.children
         .filter((c): c is ListingChildComment => c.kind === "t1")
