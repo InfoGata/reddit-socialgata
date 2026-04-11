@@ -6,5 +6,9 @@
   "script": "dist/index.js",
   "options": "dist/options.html",
   "updateUrl": "https://cdn.jsdelivr.net/gh/InfoGata/reddit-socialgata@latest/manifest.json",
-  "homepage": "https://github.com/InfoGata/reddit-socialgata"
+  "homepage": "https://github.com/InfoGata/reddit-socialgata",
+  "siteMatch": [
+    "https://www.reddit.com/*",
+    "https://old.reddit.com/*"
+  ]
 }
