@@ -208,6 +208,10 @@ interface UserResponse {
 // State
 let accessToken = localStorage.getItem(REDDIT_TOKEN_KEY) || "";
 
+const httpRequest = (url: string, init?: RequestInit) => {
+  return fetch(url, init);
+};
+
 /**
  * Decodes HTML entities in URLs (e.g., &amp; -> &)
  * Reddit API sometimes returns URLs with HTML-encoded ampersands which break image loading
@@ -309,7 +313,7 @@ const getVideoUrlFromVxReddit = async (
     const vxRedditUrl = `https://vxreddit.com${permalink}`;
 
     // Fetch the vxReddit page
-    const response = await application.networkRequest(vxRedditUrl);
+    const response = await httpRequest(vxRedditUrl);
     const html = await response.text();
 
     // Parse HTML to find video URL
@@ -353,7 +357,7 @@ const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
     url.searchParams.append("after", String(request.pageInfo.page));
   }
 
-  const response = await application.networkRequest(url.toString(), {
+  const response = await httpRequest(url.toString(), {
     headers,
   });
   const json: RedditResponse = await response.json();
@@ -388,7 +392,7 @@ const getCommunity = async (
     url.searchParams.append("after", String(request.pageInfo.page));
   }
 
-  const response = await application.networkRequest(url.toString(), {
+  const response = await httpRequest(url.toString(), {
     headers,
   });
   const json: RedditResponse = await response.json();
@@ -412,7 +416,7 @@ const getComments = async (
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}/r/${request.communityId}/comments/${request.apiId}.json`;
-  const response = await application.networkRequest(url, {
+  const response = await httpRequest(url, {
     headers,
   });
   const json: CommentsResponse = await response.json();
@@ -448,7 +452,7 @@ const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}/user/${request.apiId}/overview.json`;
-  const response = await application.networkRequest(url, {
+  const response = await httpRequest(url, {
     headers,
   });
   const json: UserResponse = await response.json();
@@ -472,7 +476,7 @@ const getCommunities = async (
     url.searchParams.append("after", String(request.pageInfo.page));
   }
 
-  const response = await application.networkRequest(url.toString(), {
+  const response = await httpRequest(url.toString(), {
     headers,
   });
   const json = await response.json();
@@ -507,7 +511,7 @@ const search = async (request: SearchRequest): Promise<SearchResponse> => {
     url.searchParams.append("after", String(request.pageInfo.page));
   }
 
-  const response = await application.networkRequest(url.toString(), {
+  const response = await httpRequest(url.toString(), {
     headers,
   });
   const json: RedditResponse = await response.json();
