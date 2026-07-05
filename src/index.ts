@@ -208,7 +208,10 @@ interface UserResponse {
 // State
 let accessToken = localStorage.getItem(REDDIT_TOKEN_KEY) || "";
 
-const httpRequest = (url: string, init?: RequestInit) => {
+const httpRequest = async (url: string, init?: RequestInit) => {
+  if (await application.isNetworkRequestCorsDisabled()) {
+    return application.networkRequest(url, init);
+  }
   return fetch(url, init);
 };
 
