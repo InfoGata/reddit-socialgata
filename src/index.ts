@@ -61,6 +61,11 @@ interface ListingChildCommentData {
   created: number;
   created_utc: number;
   depth: number;
+  score: number;
+  is_submitter: boolean;
+  distinguished: string | null;
+  stickied: boolean;
+  edited: boolean | number;
   replies?: Listing;
   id: string;
 }
@@ -363,11 +368,16 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
     title: post.title,
     numOfComments: post.num_comments,
     score: post.score,
+    // With raw_json=1 Reddit returns `selftext_html` as real (unescaped) HTML,
+    // which the app renders directly. Fall back to the raw markdown otherwise.
+    body: post.selftext_html || post.selftext,
+    publishedDate: post.created_utc
+      ? new Date(post.created_utc * 1000).toISOString()
+      : undefined,
     authorName: post.author,
     authorApiId: post.author,
     communityName: post.subreddit,
     communityApiId: post.subreddit,
-    body: post.selftext,
     thumbnailUrl:
       post.thumbnail === "self"
         ? undefined
@@ -378,15 +388,32 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
     originalUrl: `${REDDIT_PUBLIC_API_BASE}${post.permalink}`,
     isVideo,
     videoSources: videoSources.length > 0 ? videoSources : undefined,
+    flair: post.link_flair_text || undefined,
+    upvoteRatio: post.upvote_ratio,
+    nsfw: post.over_18 || undefined,
+    spoiler: post.spoiler || undefined,
+    locked: post.locked || undefined,
+    stickied: post.stickied || undefined,
+    edited: post.edited ? true : undefined,
+    distinguished: post.distinguished || undefined,
   };
 };
 
 const redditCommentToPost = (comment: ListingChildCommentData): Post => {
   return {
     apiId: comment.id,
-    body: comment.body,
+    // `body_html` is real HTML with raw_json=1; fall back to markdown otherwise.
+    body: comment.body_html || comment.body,
     authorName: comment.author,
     authorApiId: comment.author,
+    score: comment.score,
+    publishedDate: comment.created_utc
+      ? new Date(comment.created_utc * 1000).toISOString()
+      : undefined,
+    isSubmitter: comment.is_submitter || undefined,
+    distinguished: comment.distinguished || undefined,
+    stickied: comment.stickied || undefined,
+    edited: comment.edited ? true : undefined,
     comments:
       comment.replies?.data?.children
         .filter((c): c is ListingChildComment => c.kind === "t1")
