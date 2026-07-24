@@ -2,7 +2,7 @@
   "id": "2XJix5oj3Xqd",
   "alias": "reddit",
   "name": "Reddit Plugin for SocialGata",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "Browse Reddit feeds, communities, and comments",
   "script": "dist/index.js",
   "options": "dist/options.html",

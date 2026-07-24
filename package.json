@@ -1,6 +1,6 @@
 {
   "name": "reddit-socialgata",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "SocialGata plugin for Reddit",
   "author": "",
   "dependencies": {
@@ -18,7 +18,7 @@
     "build:plugin": "vite build --config plugin.vite.config.ts"
   },
   "devDependencies": {
-    "@infogata/socialgata-plugin-typings": "^0.5.0",
+    "@infogata/socialgata-plugin-typings": "^0.8.0",
     "@preact/preset-vite": "^2.10.5",
     "@tailwindcss/vite": "^4.3.1",
     "@types/react": "^19.2.7",

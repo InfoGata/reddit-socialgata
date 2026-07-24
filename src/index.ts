@@ -98,7 +98,7 @@ interface ListingChildPostData {
   author_flair_template_id: string | null;
   is_original_content: boolean;
   user_reports: Array<string>;
-  secure_media: string | null;
+  secure_media: RedditMedia | null;
   is_reddit_media_domain: boolean;
   is_meta: boolean;
   category: string | null;
@@ -170,14 +170,39 @@ interface ListingChildPostData {
   subreddit_subscribers: number;
   created_utc: number;
   num_crossposts: number;
-  media: string | null;
+  media: RedditMedia | null;
   is_video: boolean;
+  post_hint?: string;
+  crosspost_parent_list?: ListingChildPostData[];
   preview?: Preview;
+}
+
+interface RedditMedia {
+  reddit_video?: RedditVideo;
+  /** Host of an embedded player, e.g. "redgifs.com", "youtube.com" */
+  type?: string;
+}
+
+interface RedditVideo {
+  bitrate_kbps: number;
+  /** mp4, but VIDEO ONLY unless is_gif — audio lives in a separate DASH track */
+  fallback_url: string;
+  has_audio?: boolean;
+  height: number;
+  width: number;
+  scrubber_media_url: string;
+  dash_url: string;
+  duration: number;
+  hls_url: string;
+  is_gif: boolean;
+  transcoding_status: string;
 }
 
 interface Preview {
   enabled: boolean;
   images: PreviewImage[];
+  /** Reddit-hosted rehost of a linked-out clip (redgifs, gfycat, ...) */
+  reddit_video_preview?: RedditVideo;
 }
 
 interface PreviewImage {
@@ -208,11 +233,19 @@ interface UserResponse {
 // State
 let accessToken = localStorage.getItem(REDDIT_TOKEN_KEY) || "";
 
+/**
+ * Every Reddit API read goes through here. `raw_json=1` stops Reddit
+ * HTML-escaping urls in its JSON, which otherwise corrupts the signed query
+ * params on `hls_url`/`dash_url` (`&` arriving as `&amp;`).
+ */
 const httpRequest = async (url: string, init?: RequestInit) => {
+  const requestUrl = new URL(url);
+  requestUrl.searchParams.set("raw_json", "1");
+  const finalUrl = requestUrl.toString();
   if (await application.isNetworkRequestCorsDisabled()) {
-    return application.networkRequest(url, init);
+    return application.networkRequest(finalUrl, init);
   }
-  return fetch(url, init);
+  return fetch(finalUrl, init);
 };
 
 /**
@@ -240,6 +273,65 @@ const isValidUrl = (url: string | undefined): boolean => {
 const PLACEHOLDER_THUMBNAIL =
   'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="140" height="140" viewBox="0 0 140 140"%3E%3Crect width="140" height="140" fill="%23ddd"/%3E%3Ctext x="50%25" y="50%25" dominant-baseline="middle" text-anchor="middle" font-family="monospace" font-size="16" fill="%23999"%3ENo Image%3C/text%3E%3C/svg%3E';
 
+const HLS_TYPE = "application/x-mpegURL";
+
+/**
+ * Reddit's `fallback_url` mp4 carries no audio track (audio is a separate DASH
+ * representation), so HLS is the only single-url source that plays with sound.
+ * The mp4 is still worth emitting as a silent last resort.
+ */
+const redditVideoToSources = (video: RedditVideo): VideoSource[] => {
+  const sources: VideoSource[] = [];
+  const hls = decodeHtmlEntities(video.hls_url);
+  const fallback = decodeHtmlEntities(video.fallback_url);
+
+  if (video.is_gif) {
+    // No audio track exists at all, so the mp4 loses nothing and avoids hls.js.
+    if (fallback) sources.push({ source: fallback, type: "video/mp4" });
+    if (hls) sources.push({ source: hls, type: HLS_TYPE });
+  } else {
+    if (hls) sources.push({ source: hls, type: HLS_TYPE });
+    if (fallback) sources.push({ source: fallback, type: "video/mp4" });
+  }
+  return sources;
+};
+
+const getVideoSources = (post: ListingChildPostData): VideoSource[] => {
+  const redditVideo =
+    post.secure_media?.reddit_video ??
+    post.media?.reddit_video ??
+    post.crosspost_parent_list?.[0]?.secure_media?.reddit_video ??
+    post.preview?.reddit_video_preview;
+  if (redditVideo) return redditVideoToSources(redditVideo);
+
+  const url = decodeHtmlEntities(post.url);
+  if (!url) return [];
+  // Imgur .gifv is an mp4 wearing a costume.
+  if (/\.gifv(\?|$)/i.test(url)) {
+    return [{ source: url.replace(/\.gifv/i, ".mp4"), type: "video/mp4" }];
+  }
+  if (/\.(mp4|webm|mov)(\?|$)/i.test(url)) {
+    return [
+      { source: url, type: /\.webm/i.test(url) ? "video/webm" : "video/mp4" },
+    ];
+  }
+  return [];
+};
+
+/**
+ * Poster frame for a video post. Prefers the largest preview no wider than
+ * 640px, since `post.thumbnail` is a ~140px crop that looks bad blown up.
+ */
+const getVideoThumbnail = (
+  post: ListingChildPostData
+): string | undefined => {
+  const image = post.preview?.images[0];
+  const best = image?.resolutions
+    ?.filter((r) => r.width <= 640)
+    .sort((a, b) => b.width - a.width)[0];
+  return best?.url ?? image?.source?.url ?? post.thumbnail;
+};
+
 const hasLogin = () => {
   return !!accessToken;
 };
@@ -261,11 +353,9 @@ const getHeaders = (): HeadersInit => {
 };
 
 const redditPostsToPost = (post: ListingChildPostData): Post => {
-  const thumbnailUrl = post.is_video
-    ? post.preview?.images[0]?.resolutions?.find(
-        (r): r is PreviewImageResolution => r.width === 640
-      )?.url
-    : post.thumbnail;
+  const videoSources = getVideoSources(post);
+  const isVideo = post.is_video || videoSources.length > 0;
+  const thumbnailUrl = isVideo ? getVideoThumbnail(post) : post.thumbnail;
   const decodedThumbnail = decodeHtmlEntities(thumbnailUrl);
 
   return {
@@ -285,7 +375,8 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
         ? decodedThumbnail
         : PLACEHOLDER_THUMBNAIL,
     url: post.thumbnail === "self" ? undefined : decodeHtmlEntities(post.url),
-    isVideo: post.is_video,
+    isVideo,
+    videoSources: videoSources.length > 0 ? videoSources : undefined,
   };
 };
 
@@ -306,45 +397,6 @@ const redditCommentToPost = (comment: ListingChildCommentData): Post => {
       (c): c is ListingMore => c.kind === "more"
     )?.data?.count,
   };
-};
-
-const getVideoUrlFromVxReddit = async (
-  permalink: string
-): Promise<string | undefined> => {
-  try {
-    // Convert Reddit URL to vxReddit URL
-    const vxRedditUrl = `https://vxreddit.com${permalink}`;
-
-    // Fetch the vxReddit page
-    const response = await httpRequest(vxRedditUrl);
-    const html = await response.text();
-
-    // Parse HTML to find video URL
-    // vxReddit typically has the video URL in a meta tag or video element
-    const videoUrlMatch = html.match(
-      /<meta property="og:video" content="([^"]+)"/
-    );
-    if (videoUrlMatch && videoUrlMatch[1]) {
-      return videoUrlMatch[1];
-    }
-
-    // Fallback: try to find video source tag
-    const sourceMatch = html.match(/<source src="([^"]+)" type="video\/mp4"/);
-    if (sourceMatch && sourceMatch[1]) {
-      return sourceMatch[1];
-    }
-
-    // Another fallback: look for direct video URL in the page
-    const directVideoMatch = html.match(/https:\/\/[^"'\s]+\.mp4/);
-    if (directVideoMatch) {
-      return directVideoMatch[0];
-    }
-
-    return undefined;
-  } catch (error) {
-    console.error("Error fetching video URL from vxReddit:", error);
-    return undefined;
-  }
 };
 
 // Plugin Methods
@@ -435,15 +487,6 @@ const getComments = async (
   )?.data;
   post.moreRepliesId = more?.id;
   post.moreRepliesCount = more?.count;
-
-  // If it's a video post, get the actual video URL from vxReddit
-  if (post.isVideo) {
-    const postData = json[0].data.children[0].data;
-    const videoUrl = await getVideoUrlFromVxReddit(postData.permalink);
-    if (videoUrl) {
-      post.url = videoUrl;
-    }
-  }
 
   return {
     items,
