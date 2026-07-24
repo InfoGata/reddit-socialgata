@@ -375,6 +375,7 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
         ? decodedThumbnail
         : PLACEHOLDER_THUMBNAIL,
     url: post.thumbnail === "self" ? undefined : decodeHtmlEntities(post.url),
+    originalUrl: `${REDDIT_PUBLIC_API_BASE}${post.permalink}`,
     isVideo,
     videoSources: videoSources.length > 0 ? videoSources : undefined,
   };
