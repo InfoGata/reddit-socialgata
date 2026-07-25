@@ -235,6 +235,59 @@ interface UserResponse {
   data: ListingData;
 }
 
+// Sort configuration
+const TIME_RANGES: TimeRange[] = [
+  { id: "hour", displayName: "Now" },
+  { id: "day", displayName: "Today" },
+  { id: "week", displayName: "This Week" },
+  { id: "month", displayName: "This Month" },
+  { id: "year", displayName: "This Year" },
+  { id: "all", displayName: "All Time" },
+];
+
+const LISTING_SORTS: SortOption[] = [
+  { id: "hot", displayName: "Hot" },
+  { id: "new", displayName: "New" },
+  {
+    id: "top",
+    displayName: "Top",
+    timeRanges: TIME_RANGES,
+    defaultTimeRangeId: "day",
+  },
+  { id: "rising", displayName: "Rising" },
+  {
+    id: "controversial",
+    displayName: "Controversial",
+    timeRanges: TIME_RANGES,
+    defaultTimeRangeId: "day",
+  },
+];
+
+// Reddit user overviews don't support the "rising" sort.
+const USER_SORTS: SortOption[] = LISTING_SORTS.filter((s) => s.id !== "rising");
+
+/**
+ * Resolves a requested sort/time-range against the available options, falling
+ * back to safe defaults so a bad/missing url param can't build an invalid
+ * Reddit path. Returns the chosen sort plus the time range id to apply (only
+ * defined when the sort declares time ranges).
+ */
+const resolveSort = (
+  options: SortOption[],
+  sortId?: string,
+  timeRangeId?: string
+): { sort: SortOption; timeRangeId?: string } => {
+  const sort = options.find((s) => s.id === sortId) ?? options[0];
+  if (!sort.timeRanges) {
+    return { sort, timeRangeId: undefined };
+  }
+  const resolvedTimeRangeId =
+    sort.timeRanges.find((t) => t.id === timeRangeId)?.id ??
+    sort.defaultTimeRangeId ??
+    sort.timeRanges[0]?.id;
+  return { sort, timeRangeId: resolvedTimeRangeId };
+};
+
 // State
 let accessToken = localStorage.getItem(REDDIT_TOKEN_KEY) || "";
 
@@ -429,15 +482,50 @@ const redditCommentToPost = (comment: ListingChildCommentData): Post => {
 
 // Plugin Methods
 
+/**
+ * Front-page listings. "Home" is the logged-in user's subscribed feed and is
+ * only meaningful with a login; "Popular"/"All" are the public listings. The
+ * id maps to the Reddit path prefix the sort is appended to.
+ */
+const FEED_LISTING_PREFIXES: Record<string, string> = {
+  home: "",
+  popular: "/r/popular",
+  all: "/r/all",
+};
+
+const getFeedTypes = (): FeedType[] => {
+  const types: FeedType[] = [
+    { id: "popular", displayName: "Popular" },
+    { id: "all", displayName: "All" },
+  ];
+  if (hasLogin()) {
+    types.unshift({ id: "home", displayName: "Home" });
+  }
+  return types;
+};
+
 const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
-  const path = "/hot.json";
 
-  // Build URL with pagination parameters
-  const url = new URL(`${baseUrl}${path}`);
+  const feedTypes = getFeedTypes();
+  const feedTypeId =
+    feedTypes.find((f) => f.id === request?.feedTypeId)?.id ?? feedTypes[0].id;
+  const prefix = FEED_LISTING_PREFIXES[feedTypeId] ?? "";
+
+  const { sort, timeRangeId } = resolveSort(
+    LISTING_SORTS,
+    request?.sortId,
+    request?.timeRangeId
+  );
+
+  // Build URL with pagination + sort parameters
+  const url = new URL(`${baseUrl}${prefix}/${sort.id}.json`);
   if (request?.pageInfo?.page) {
     url.searchParams.append("after", String(request.pageInfo.page));
+  }
+  if (timeRangeId) {
+    url.searchParams.append("t", timeRangeId);
   }
 
   const response = await httpRequest(url.toString(), {
@@ -460,6 +548,11 @@ const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
       nextPage: json.data?.after ?? undefined,
       prevPage: json.data?.before ?? undefined,
     },
+    feedTypes,
+    feedTypeId,
+    sortOptions: LISTING_SORTS,
+    sortId: sort.id,
+    timeRangeId,
   };
 };
 
@@ -468,11 +561,20 @@ const getCommunity = async (
 ): Promise<GetCommunityResponse> => {
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
-  const path = `/r/${request.apiId}/hot.json`;
+
+  const { sort, timeRangeId } = resolveSort(
+    LISTING_SORTS,
+    request.sortId,
+    request.timeRangeId
+  );
+  const path = `/r/${request.apiId}/${sort.id}.json`;
 
   const url = new URL(`${baseUrl}${path}`);
   if (request.pageInfo?.page) {
     url.searchParams.append("after", String(request.pageInfo.page));
+  }
+  if (timeRangeId) {
+    url.searchParams.append("t", timeRangeId);
   }
 
   const response = await httpRequest(url.toString(), {
@@ -490,6 +592,9 @@ const getCommunity = async (
       nextPage: json.data?.after ?? undefined,
       prevPage: json.data?.before ?? undefined,
     },
+    sortOptions: LISTING_SORTS,
+    sortId: sort.id,
+    timeRangeId,
   };
 };
 
@@ -525,8 +630,19 @@ const getComments = async (
 const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
-  const url = `${baseUrl}/user/${request.apiId}/overview.json`;
-  const response = await httpRequest(url, {
+
+  const { sort, timeRangeId } = resolveSort(
+    USER_SORTS,
+    request.sortId,
+    request.timeRangeId
+  );
+  const url = new URL(`${baseUrl}/user/${request.apiId}/overview.json`);
+  url.searchParams.append("sort", sort.id);
+  if (timeRangeId) {
+    url.searchParams.append("t", timeRangeId);
+  }
+
+  const response = await httpRequest(url.toString(), {
     headers,
   });
   const json: UserResponse = await response.json();
@@ -537,6 +653,9 @@ const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   });
   return {
     items,
+    sortOptions: USER_SORTS,
+    sortId: sort.id,
+    timeRangeId,
   };
 };
 
