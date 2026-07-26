@@ -267,6 +267,44 @@ const LISTING_SORTS: SortOption[] = [
 const USER_SORTS: SortOption[] = LISTING_SORTS.filter((s) => s.id !== "rising");
 
 /**
+ * Search has its own sort vocabulary, distinct from the listing sorts, and
+ * every one of them accepts a time range. Defaults to all-time so a query
+ * isn't silently narrowed to the last day.
+ */
+const SEARCH_SORTS: SortOption[] = [
+  {
+    id: "relevance",
+    displayName: "Relevance",
+    timeRanges: TIME_RANGES,
+    defaultTimeRangeId: "all",
+  },
+  {
+    id: "hot",
+    displayName: "Hot",
+    timeRanges: TIME_RANGES,
+    defaultTimeRangeId: "all",
+  },
+  {
+    id: "top",
+    displayName: "Top",
+    timeRanges: TIME_RANGES,
+    defaultTimeRangeId: "all",
+  },
+  {
+    id: "new",
+    displayName: "New",
+    timeRanges: TIME_RANGES,
+    defaultTimeRangeId: "all",
+  },
+  {
+    id: "comments",
+    displayName: "Most Comments",
+    timeRanges: TIME_RANGES,
+    defaultTimeRangeId: "all",
+  },
+];
+
+/**
  * Resolves a requested sort/time-range against the available options, falling
  * back to safe defaults so a bad/missing url param can't build an invalid
  * Reddit path. Returns the chosen sort plus the time range id to apply (only
@@ -480,6 +518,30 @@ const redditCommentToPost = (comment: ListingChildCommentData): Post => {
   };
 };
 
+/**
+ * Fetches a Reddit post listing and maps it to items + pagination. Every post
+ * listing endpoint (front page, subreddit, search) returns the same envelope,
+ * so callers only have to build the url.
+ */
+const fetchPostListing = async (
+  url: URL
+): Promise<{ items: Post[]; pageInfo: PageInfo }> => {
+  const response = await httpRequest(url.toString(), {
+    headers: getHeaders(),
+  });
+  const json: RedditResponse = await response.json();
+  return {
+    items:
+      json.data?.children
+        .filter((c): c is ListingChildPost => c.kind === "t3")
+        .map((c) => redditPostsToPost(c.data)) ?? [],
+    pageInfo: {
+      nextPage: json.data?.after ?? undefined,
+      prevPage: json.data?.before ?? undefined,
+    },
+  };
+};
+
 // Plugin Methods
 
 /**
@@ -505,7 +567,6 @@ const getFeedTypes = (): FeedType[] => {
 };
 
 const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
-  const headers = getHeaders();
   const baseUrl = getBaseUrl();
 
   const feedTypes = getFeedTypes();
@@ -528,14 +589,7 @@ const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
     url.searchParams.append("t", timeRangeId);
   }
 
-  const response = await httpRequest(url.toString(), {
-    headers,
-  });
-  const json: RedditResponse = await response.json();
-  const items =
-    json.data?.children
-      .filter((c): c is ListingChildPost => c.kind === "t3")
-      .map((c) => redditPostsToPost(c.data)) ?? [];
+  const { items, pageInfo } = await fetchPostListing(url);
 
   items.forEach((item, index) => {
     item.number =
@@ -544,10 +598,7 @@ const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
 
   return {
     items,
-    pageInfo: {
-      nextPage: json.data?.after ?? undefined,
-      prevPage: json.data?.before ?? undefined,
-    },
+    pageInfo,
     feedTypes,
     feedTypeId,
     sortOptions: LISTING_SORTS,
@@ -559,7 +610,6 @@ const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
 const getCommunity = async (
   request: GetCommunityRequest
 ): Promise<GetCommunityResponse> => {
-  const headers = getHeaders();
   const baseUrl = getBaseUrl();
 
   const { sort, timeRangeId } = resolveSort(
@@ -577,22 +627,44 @@ const getCommunity = async (
     url.searchParams.append("t", timeRangeId);
   }
 
-  const response = await httpRequest(url.toString(), {
-    headers,
-  });
-  const json: RedditResponse = await response.json();
-  const items =
-    json.data?.children
-      .filter((c): c is ListingChildPost => c.kind === "t3")
-      .map((c) => redditPostsToPost(c.data)) ?? [];
+  return {
+    ...(await fetchPostListing(url)),
+    sortOptions: LISTING_SORTS,
+    sortId: sort.id,
+    timeRangeId,
+  };
+};
+
+/**
+ * Searches within a single subreddit. `restrict_sr=1` is what keeps results
+ * scoped to it — without it Reddit widens the search to the whole site.
+ */
+const searchCommunity = async (
+  request: SearchCommunityRequest
+): Promise<SearchCommunityResponse> => {
+  const { sort, timeRangeId } = resolveSort(
+    SEARCH_SORTS,
+    request.sortId,
+    request.timeRangeId
+  );
+
+  const url = new URL(
+    `${getBaseUrl()}/r/${request.communityApiId}/search.json`
+  );
+  url.searchParams.append("q", request.query);
+  url.searchParams.append("restrict_sr", "1");
+  url.searchParams.append("type", "link");
+  url.searchParams.append("sort", sort.id);
+  if (timeRangeId) {
+    url.searchParams.append("t", timeRangeId);
+  }
+  if (request.pageInfo?.page) {
+    url.searchParams.append("after", String(request.pageInfo.page));
+  }
 
   return {
-    items,
-    pageInfo: {
-      nextPage: json.data?.after ?? undefined,
-      prevPage: json.data?.before ?? undefined,
-    },
-    sortOptions: LISTING_SORTS,
+    ...(await fetchPostListing(url)),
+    sortOptions: SEARCH_SORTS,
     sortId: sort.id,
     timeRangeId,
   };
@@ -693,7 +765,6 @@ const getCommunities = async (
 };
 
 const search = async (request: SearchRequest): Promise<SearchResponse> => {
-  const headers = getHeaders();
   const baseUrl = getBaseUrl();
   const path = "/search.json";
 
@@ -704,22 +775,7 @@ const search = async (request: SearchRequest): Promise<SearchResponse> => {
     url.searchParams.append("after", String(request.pageInfo.page));
   }
 
-  const response = await httpRequest(url.toString(), {
-    headers,
-  });
-  const json: RedditResponse = await response.json();
-  const items =
-    json.data?.children
-      .filter((c): c is ListingChildPost => c.kind === "t3")
-      .map((c) => redditPostsToPost(c.data)) ?? [];
-
-  return {
-    items,
-    pageInfo: {
-      nextPage: json.data?.after ?? undefined,
-      prevPage: json.data?.before ?? undefined,
-    },
-  };
+  return fetchPostListing(url);
 };
 
 const login = async (request: LoginRequest): Promise<void> => {
@@ -825,6 +881,7 @@ application.onGetCommunities = getCommunities;
 application.onGetComments = getComments;
 application.onGetUser = getUser;
 application.onSearch = search;
+application.onSearchCommunity = searchCommunity;
 application.onLogin = login;
 application.onLogout = logout;
 application.onIsLoggedIn = isLoggedIn;
