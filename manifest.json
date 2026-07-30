@@ -2,7 +2,7 @@
   "id": "2XJix5oj3Xqd",
   "alias": "reddit",
   "name": "Reddit Plugin for SocialGata",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Browse Reddit feeds, communities, and comments",
   "script": "dist/index.js",
   "options": "dist/options.html",
@@ -13,6 +13,10 @@
     "https://old.reddit.com/*"
   ],
   "redirects": [
+    {
+      "pattern": "https://*.reddit.com/r/:community/comments/:postId/:slug/:commentId{/*}?",
+      "path": "/c/:community/post/:postId/comment/:commentId"
+    },
     {
       "pattern": "https://*.reddit.com/r/:community/comments/:postId/*",
       "path": "/c/:community/post/:postId"

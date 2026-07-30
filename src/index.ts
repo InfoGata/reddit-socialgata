@@ -68,6 +68,13 @@ interface ListingChildCommentData {
   edited: boolean | number;
   replies?: Listing;
   id: string;
+  /** Path to the comment on reddit, e.g. `/r/sub/comments/<post>/<slug>/<id>/` */
+  permalink?: string;
+  subreddit?: string;
+  /** Fullname of the post the comment belongs to, e.g. `t3_1mvyt0v` */
+  link_id?: string;
+  /** Fullname of the parent comment or post */
+  parent_id?: string;
 }
 
 interface ListingChildPostData {
@@ -505,6 +512,12 @@ const redditCommentToPost = (comment: ListingChildCommentData): Post => {
     distinguished: comment.distinguished || undefined,
     stickied: comment.stickied || undefined,
     edited: comment.edited ? true : undefined,
+    communityName: comment.subreddit,
+    communityApiId: comment.subreddit,
+    // Reddit's own comment permalink: the post page focused on this comment.
+    originalUrl: comment.permalink
+      ? `${REDDIT_PUBLIC_API_BASE}${comment.permalink}`
+      : undefined,
     comments:
       comment.replies?.data?.children
         .filter((c): c is ListingChildComment => c.kind === "t1")
@@ -675,8 +688,18 @@ const getComments = async (
 ): Promise<GetCommentsResponse> => {
   const headers = getHeaders();
   const baseUrl = getBaseUrl();
-  const url = `${baseUrl}/r/${request.communityId}/comments/${request.apiId}.json`;
-  const response = await httpRequest(url, {
+  // The subreddit prefix is optional on this endpoint, so requests that only
+  // know the post id (favorites, comment permalinks) still work.
+  const subredditPath = request.communityId ? `/r/${request.communityId}` : "";
+  const url = new URL(
+    `${baseUrl}${subredditPath}/comments/${request.apiId}.json`
+  );
+  if (request.commentApiId) {
+    // Single comment thread: that comment becomes the root of the listing.
+    url.searchParams.set("comment", request.commentApiId);
+    url.searchParams.set("context", "0");
+  }
+  const response = await httpRequest(url.toString(), {
     headers,
   });
   const json: CommentsResponse = await response.json();
