@@ -187,6 +187,21 @@ interface ListingChildPostData {
   post_hint?: string;
   crosspost_parent_list?: ListingChildPostData[];
   preview?: Preview;
+  is_gallery?: boolean;
+  gallery_data?: GalleryData;
+  media_metadata?: Record<string, MediaMetadataEntry>;
+}
+
+interface GalleryData {
+  items: { media_id: string; id: number }[];
+}
+
+/** A single gallery image. `p` are downscaled previews, `s` the full size. */
+interface MediaMetadataEntry {
+  status: string;
+  e?: string;
+  p?: { u: string; x: number; y: number }[];
+  s?: { u: string; x: number; y: number };
 }
 
 interface RedditMedia {
@@ -370,12 +385,6 @@ const isValidUrl = (url: string | undefined): boolean => {
   return url.startsWith("http://") || url.startsWith("https://");
 };
 
-/**
- * Placeholder image for non-URL thumbnails (spoiler, default, nsfw, etc.)
- */
-const PLACEHOLDER_THUMBNAIL =
-  'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="140" height="140" viewBox="0 0 140 140"%3E%3Crect width="140" height="140" fill="%23ddd"/%3E%3Ctext x="50%25" y="50%25" dominant-baseline="middle" text-anchor="middle" font-family="monospace" font-size="16" fill="%23999"%3ENo Image%3C/text%3E%3C/svg%3E';
-
 const HLS_TYPE = "application/x-mpegURL";
 
 /**
@@ -422,17 +431,52 @@ const getVideoSources = (post: ListingChildPostData): VideoSource[] => {
 };
 
 /**
- * Poster frame for a video post. Prefers the largest preview no wider than
- * 640px, since `post.thumbnail` is a ~140px crop that looks bad blown up.
+ * Widest image we ask Reddit for. `post.thumbnail` is a ~140px crop that looks
+ * bad blown up, and the multi-megapixel source is wasteful for a feed.
  */
-const getVideoThumbnail = (
-  post: ListingChildPostData
-): string | undefined => {
+const MAX_THUMBNAIL_WIDTH = 640;
+
+const IMAGE_URL_REGEX = /\.(png|jpe?g|gif|webp|avif|bmp)(\?|$)/i;
+
+/** Largest preview no wider than the cap, or undefined if they're all bigger. */
+const largestUnder = <T>(
+  items: T[] | undefined,
+  width: (item: T) => number
+): T | undefined =>
+  items
+    ?.filter((i) => width(i) <= MAX_THUMBNAIL_WIDTH)
+    .sort((a, b) => width(b) - width(a))[0];
+
+/** Reddit-generated previews. Present for images, links and videos alike. */
+const getPreviewImage = (post: ListingChildPostData): string | undefined => {
   const image = post.preview?.images[0];
-  const best = image?.resolutions
-    ?.filter((r) => r.width <= 640)
-    .sort((a, b) => b.width - a.width)[0];
-  return best?.url ?? image?.source?.url ?? post.thumbnail;
+  if (!image) return undefined;
+  return largestUnder(image.resolutions, (r) => r.width)?.url ?? image.source?.url;
+};
+
+/**
+ * Galleries carry no `preview` at all — their images only exist in
+ * `media_metadata`, keyed by the ids listed in `gallery_data`.
+ */
+const getGalleryImage = (post: ListingChildPostData): string | undefined => {
+  const mediaId = post.gallery_data?.items?.[0]?.media_id;
+  const media = mediaId ? post.media_metadata?.[mediaId] : undefined;
+  if (!media || media.status !== "valid") return undefined;
+  return largestUnder(media.p, (p) => p.x)?.u ?? media.s?.u;
+};
+
+/**
+ * `post.thumbnail` is only sometimes a url; for most posts it's a keyword
+ * ("image", "default", "self", "nsfw", "spoiler") even when the listing carries
+ * full image urls elsewhere. So it's the last resort, not the first.
+ */
+const getThumbnailUrl = (post: ListingChildPostData): string | undefined => {
+  const url =
+    getPreviewImage(post) ??
+    getGalleryImage(post) ??
+    (IMAGE_URL_REGEX.test(post.url) ? post.url : undefined) ??
+    (isValidUrl(post.thumbnail) ? post.thumbnail : undefined);
+  return decodeHtmlEntities(url);
 };
 
 const hasLogin = () => {
@@ -458,8 +502,9 @@ const getHeaders = (): HeadersInit => {
 const redditPostsToPost = (post: ListingChildPostData): Post => {
   const videoSources = getVideoSources(post);
   const isVideo = post.is_video || videoSources.length > 0;
-  const thumbnailUrl = isVideo ? getVideoThumbnail(post) : post.thumbnail;
-  const decodedThumbnail = decodeHtmlEntities(thumbnailUrl);
+  // A text post's `url` is its own permalink, which would make the title link
+  // bounce out to Reddit instead of opening the post in the app.
+  const isSelfPost = post.is_self || post.thumbnail === "self";
 
   return {
     apiId: post.id,
@@ -476,13 +521,8 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
     authorApiId: post.author,
     communityName: post.subreddit,
     communityApiId: post.subreddit,
-    thumbnailUrl:
-      post.thumbnail === "self"
-        ? undefined
-        : isValidUrl(decodedThumbnail)
-        ? decodedThumbnail
-        : PLACEHOLDER_THUMBNAIL,
-    url: post.thumbnail === "self" ? undefined : decodeHtmlEntities(post.url),
+    thumbnailUrl: getThumbnailUrl(post),
+    url: isSelfPost ? undefined : decodeHtmlEntities(post.url),
     originalUrl: `${REDDIT_PUBLIC_API_BASE}${post.permalink}`,
     isVideo,
     videoSources: videoSources.length > 0 ? videoSources : undefined,
