@@ -289,6 +289,20 @@ const LISTING_SORTS: SortOption[] = [
 const USER_SORTS: SortOption[] = LISTING_SORTS.filter((s) => s.id !== "rising");
 
 /**
+ * Comments have their own sort vocabulary and, unlike the listing sorts, none
+ * of them accept a time range. "confidence" is Reddit's id for what the site
+ * labels "Best", and is the fallback default.
+ */
+const COMMENT_SORTS: SortOption[] = [
+  { id: "confidence", displayName: "Best" },
+  { id: "top", displayName: "Top" },
+  { id: "new", displayName: "New" },
+  { id: "controversial", displayName: "Controversial" },
+  { id: "old", displayName: "Old" },
+  { id: "qa", displayName: "Q&A" },
+];
+
+/**
  * Search has its own sort vocabulary, distinct from the listing sorts, and
  * every one of them accepts a time range. Defaults to all-time so a query
  * isn't silently narrowed to the last day.
@@ -739,6 +753,14 @@ const getComments = async (
     url.searchParams.set("comment", request.commentApiId);
     url.searchParams.set("context", "0");
   }
+  // Only pin a sort once one has been picked. Left off, Reddit falls back to
+  // the subreddit's own suggested sort, which is the default we want.
+  const requestedSort = request.sortId
+    ? resolveSort(COMMENT_SORTS, request.sortId).sort
+    : undefined;
+  if (requestedSort) {
+    url.searchParams.set("sort", requestedSort.id);
+  }
   const response = await httpRequest(url.toString(), {
     headers,
   });
@@ -747,18 +769,28 @@ const getComments = async (
     json[1].data?.children
       .filter((c): c is ListingChildComment => c.kind === "t1")
       .map((c) => redditCommentToPost(c.data)) ?? [];
-  const post = json[0].data.children
-    .filter((c): c is ListingChildPost => c.kind === "t3")
-    .map((c) => redditPostsToPost(c.data))[0];
+  const postChild = json[0].data.children.filter(
+    (c): c is ListingChildPost => c.kind === "t3"
+  )[0];
+  const post = redditPostsToPost(postChild.data);
   const more = json[1].data?.children.find(
     (c): c is ListingMore => c.kind === "more"
   )?.data;
   post.moreRepliesId = more?.id;
   post.moreRepliesCount = more?.count;
 
+  // Report back which sort the returned comments are actually in, so the host
+  // can show it. `suggested_sort` is the subreddit's default; it's null on most
+  // posts and can name a sort we don't offer ("random", "live"), hence Best.
+  const suggestedSort = COMMENT_SORTS.find(
+    (s) => s.id === postChild.data.suggested_sort
+  );
+
   return {
     items,
     post,
+    sortOptions: COMMENT_SORTS,
+    sortId: requestedSort?.id ?? suggestedSort?.id ?? COMMENT_SORTS[0].id,
   };
 };
 
