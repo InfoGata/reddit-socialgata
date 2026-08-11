@@ -1,4 +1,5 @@
 import { MessageType, UiMessageType } from "./shared";
+import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
 
 const REDDIT_API_BASE = "https://oauth.reddit.com";
 const REDDIT_PUBLIC_API_BASE = "https://www.reddit.com";
@@ -366,19 +367,132 @@ const resolveSort = (
 let accessToken = localStorage.getItem(REDDIT_TOKEN_KEY) || "";
 
 /**
- * Every Reddit API read goes through here. `raw_json=1` stops Reddit
- * HTML-escaping urls in its JSON, which otherwise corrupts the signed query
- * params on `hls_url`/`dash_url` (`&` arriving as `&amp;`).
+ * Reasons Reddit gives for a 403 that mean "you may not have this", as opposed
+ * to "we don't think you're a browser".
+ */
+const FORBIDDEN_REASONS = ["private", "quarantined", "banned", "gold_only"];
+
+/**
+ * Turns a failed response into an error the app can explain. The 403 split is
+ * the important part: Reddit answers 403 both for a private subreddit and for a
+ * request carrying no session cookies, and only the second is worth telling
+ * someone to go open reddit.com about.
+ */
+const responseError = async (
+  response: Response,
+  url: string
+): Promise<PluginRequestError> => {
+  const status = response.status;
+  const requestUrl = sanitizeUrl(url);
+
+  if (status === 403) {
+    // Truncated, and never shown to the user: a block page is a whole HTML
+    // document.
+    const body = await response.text().catch(() => "");
+    let reason: string | undefined;
+    try {
+      reason = JSON.parse(body.slice(0, 512))?.reason;
+    } catch {
+      // An HTML block page, which is itself the signal that we were refused.
+    }
+    if (reason && FORBIDDEN_REASONS.includes(reason)) {
+      return new PluginRequestError({
+        code: "forbidden",
+        message: `Reddit says this is ${reason}.`,
+        status,
+        requestUrl,
+        detail: reason,
+      });
+    }
+    return new PluginRequestError({
+      code: "blocked",
+      message:
+        "Reddit refused the request (403). Reddit blocks requests that don't carry a browser session.",
+      status,
+      requestUrl,
+    });
+  }
+
+  const code =
+    status === 429
+      ? "rate-limited"
+      : status === 401
+        ? "unauthorized"
+        : status === 404
+          ? "not-found"
+          : status >= 500
+            ? "server-error"
+            : "unknown";
+  return new PluginRequestError({
+    code,
+    message:
+      code === "unauthorized" && hasLogin()
+        ? "Reddit rejected the saved login. Reconnect it in this plugin's options."
+        : `Reddit returned ${status} ${response.statusText}`.trim(),
+    status,
+    requestUrl,
+  });
+};
+
+/**
+ * Every Reddit API read goes through here, which makes it the one place status
+ * has to be checked. `raw_json=1` stops Reddit HTML-escaping urls in its JSON,
+ * which otherwise corrupts the signed query params on `hls_url`/`dash_url`
+ * (`&` arriving as `&amp;`).
  */
 const httpRequest = async (url: string, init?: RequestInit) => {
   const requestUrl = new URL(url);
   requestUrl.searchParams.set("raw_json", "1");
   const finalUrl = requestUrl.toString();
-  if (await application.isNetworkRequestCorsDisabled()) {
-    return application.networkRequest(finalUrl, init);
+
+  let response: Response;
+  try {
+    response = (await application.isNetworkRequestCorsDisabled())
+      ? await application.networkRequest(finalUrl, init)
+      : await fetch(finalUrl, init);
+  } catch (error) {
+    // The host classifies its own failures; anything else never reached Reddit.
+    if (isPluginErrorLike(error)) throw error;
+    throw new PluginRequestError({
+      code: "network-error",
+      message:
+        error instanceof Error && error.message
+          ? error.message
+          : "The request to Reddit could not be made.",
+      requestUrl: sanitizeUrl(finalUrl),
+    });
   }
-  return fetch(finalUrl, init);
+
+  if (!response.ok) {
+    throw await responseError(response, finalUrl);
+  }
+  return response;
 };
+
+/**
+ * Reddit serves HTML for block and challenge pages, so a parse failure here is
+ * a report about the response, not a bug.
+ */
+const readJson = async <T>(response: Response, url: string): Promise<T> => {
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new PluginRequestError({
+      code: "invalid-response",
+      message: "Reddit's response could not be read as JSON.",
+      status: response.status,
+      requestUrl: sanitizeUrl(url),
+    });
+  }
+};
+
+/** A 2xx whose body wasn't the shape this plugin knows how to read. */
+const unexpectedShape = (url: string) =>
+  new PluginRequestError({
+    code: "invalid-response",
+    message: "Reddit returned something this plugin didn't understand.",
+    requestUrl: sanitizeUrl(url),
+  });
 
 /**
  * Decodes HTML entities in URLs (e.g., &amp; -> &)
@@ -596,15 +710,19 @@ const fetchPostListing = async (
   const response = await httpRequest(url.toString(), {
     headers: getHeaders(),
   });
-  const json: RedditResponse = await response.json();
+  const json = await readJson<RedditResponse>(response, url.toString());
+  // No listing envelope at all means we were served something else — a block
+  // page, an error document. Reporting that beats rendering an empty feed.
+  if (!json?.data?.children) {
+    throw unexpectedShape(url.toString());
+  }
   return {
-    items:
-      json.data?.children
-        .filter((c): c is ListingChildPost => c.kind === "t3")
-        .map((c) => redditPostsToPost(c.data)) ?? [],
+    items: json.data.children
+      .filter((c): c is ListingChildPost => c.kind === "t3")
+      .map((c) => redditPostsToPost(c.data)),
     pageInfo: {
-      nextPage: json.data?.after ?? undefined,
-      prevPage: json.data?.before ?? undefined,
+      nextPage: json.data.after ?? undefined,
+      prevPage: json.data.before ?? undefined,
     },
   };
 };
@@ -764,7 +882,11 @@ const getComments = async (
   const response = await httpRequest(url.toString(), {
     headers,
   });
-  const json: CommentsResponse = await response.json();
+  const json = await readJson<CommentsResponse>(response, url.toString());
+  // This endpoint returns a two-listing array: the post, then its comments.
+  if (!Array.isArray(json) || !json[0]?.data?.children || !json[1]?.data) {
+    throw unexpectedShape(url.toString());
+  }
   const items =
     json[1].data?.children
       .filter((c): c is ListingChildComment => c.kind === "t1")
@@ -772,6 +894,9 @@ const getComments = async (
   const postChild = json[0].data.children.filter(
     (c): c is ListingChildPost => c.kind === "t3"
   )[0];
+  if (!postChild) {
+    throw unexpectedShape(url.toString());
+  }
   const post = redditPostsToPost(postChild.data);
   const more = json[1].data?.children.find(
     (c): c is ListingMore => c.kind === "more"
@@ -812,7 +937,10 @@ const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   const response = await httpRequest(url.toString(), {
     headers,
   });
-  const json: UserResponse = await response.json();
+  const json = await readJson<UserResponse>(response, url.toString());
+  if (!json?.data?.children) {
+    throw unexpectedShape(url.toString());
+  }
   const items = json.data.children.map((c): Post => {
     if (c.kind === "t1") return redditCommentToPost(c.data);
     if (c.kind === "t3") return redditPostsToPost(c.data);
@@ -839,22 +967,24 @@ const getCommunities = async (
   const response = await httpRequest(url.toString(), {
     headers,
   });
-  const json = await response.json();
-  const items =
-    json.data?.children
-      .filter((c: ListingChildSubreddit) => c.kind === "t5")
-      .map((c: ListingChildSubreddit) => ({
-        apiId: c.data.display_name,
-        name: c.data.display_name,
-        description: c.data.public_description,
-        originalUrl: `https://www.reddit.com${c.data.url}`,
-      })) ?? [];
+  const json = await readJson<any>(response, url.toString());
+  if (!json?.data?.children) {
+    throw unexpectedShape(url.toString());
+  }
+  const items = json.data.children
+    .filter((c: ListingChildSubreddit) => c.kind === "t5")
+    .map((c: ListingChildSubreddit) => ({
+      apiId: c.data.display_name,
+      name: c.data.display_name,
+      description: c.data.public_description,
+      originalUrl: `https://www.reddit.com${c.data.url}`,
+    }));
 
   return {
     items,
     pageInfo: {
-      nextPage: json.data?.after ?? undefined,
-      prevPage: json.data?.before ?? undefined,
+      nextPage: json.data.after ?? undefined,
+      prevPage: json.data.before ?? undefined,
     },
   };
 };
