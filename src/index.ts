@@ -1,5 +1,13 @@
 import { MessageType, UiMessageType } from "./shared";
 import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
+import {
+  IMAGE_URL_REGEX,
+  MediaMetadataEntry,
+  decodeHtmlEntities,
+  embedMedia,
+  isValidUrl,
+  largestUnder,
+} from "./media";
 
 const REDDIT_API_BASE = "https://oauth.reddit.com";
 const REDDIT_PUBLIC_API_BASE = "https://www.reddit.com";
@@ -76,6 +84,8 @@ interface ListingChildCommentData {
   link_id?: string;
   /** Fullname of the parent comment or post */
   parent_id?: string;
+  /** Images/gifs embedded in the body, referenced from `body`/`body_html`. */
+  media_metadata?: Record<string, MediaMetadataEntry>;
 }
 
 interface ListingChildPostData {
@@ -195,14 +205,6 @@ interface ListingChildPostData {
 
 interface GalleryData {
   items: { media_id: string; id: number }[];
-}
-
-/** A single gallery image. `p` are downscaled previews, `s` the full size. */
-interface MediaMetadataEntry {
-  status: string;
-  e?: string;
-  p?: { u: string; x: number; y: number }[];
-  s?: { u: string; x: number; y: number };
 }
 
 interface RedditMedia {
@@ -494,25 +496,6 @@ const unexpectedShape = (url: string) =>
     requestUrl: sanitizeUrl(url),
   });
 
-/**
- * Decodes HTML entities in URLs (e.g., &amp; -> &)
- * Reddit API sometimes returns URLs with HTML-encoded ampersands which break image loading
- */
-const decodeHtmlEntities = (url: string | undefined): string | undefined => {
-  if (!url) return url;
-  const textarea = document.createElement("textarea");
-  textarea.innerHTML = url;
-  return textarea.value;
-};
-
-/**
- * Checks if a string is a valid URL
- */
-const isValidUrl = (url: string | undefined): boolean => {
-  if (!url) return false;
-  return url.startsWith("http://") || url.startsWith("https://");
-};
-
 const HLS_TYPE = "application/x-mpegURL";
 
 /**
@@ -557,23 +540,6 @@ const getVideoSources = (post: ListingChildPostData): VideoSource[] => {
   }
   return [];
 };
-
-/**
- * Widest image we ask Reddit for. `post.thumbnail` is a ~140px crop that looks
- * bad blown up, and the multi-megapixel source is wasteful for a feed.
- */
-const MAX_THUMBNAIL_WIDTH = 640;
-
-const IMAGE_URL_REGEX = /\.(png|jpe?g|gif|webp|avif|bmp)(\?|$)/i;
-
-/** Largest preview no wider than the cap, or undefined if they're all bigger. */
-const largestUnder = <T>(
-  items: T[] | undefined,
-  width: (item: T) => number
-): T | undefined =>
-  items
-    ?.filter((i) => width(i) <= MAX_THUMBNAIL_WIDTH)
-    .sort((a, b) => width(b) - width(a))[0];
 
 /** Reddit-generated previews. Present for images, links and videos alike. */
 const getPreviewImage = (post: ListingChildPostData): string | undefined => {
@@ -641,7 +607,9 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
     score: post.score,
     // With raw_json=1 Reddit returns `selftext_html` as real (unescaped) HTML,
     // which the app renders directly. Fall back to the raw markdown otherwise.
-    body: post.selftext_html || post.selftext,
+    body:
+      embedMedia(post.selftext_html, post.selftext, post.media_metadata) ||
+      post.selftext,
     publishedDate: post.created_utc
       ? new Date(post.created_utc * 1000).toISOString()
       : undefined,
@@ -669,7 +637,9 @@ const redditCommentToPost = (comment: ListingChildCommentData): Post => {
   return {
     apiId: comment.id,
     // `body_html` is real HTML with raw_json=1; fall back to markdown otherwise.
-    body: comment.body_html || comment.body,
+    body:
+      embedMedia(comment.body_html, comment.body, comment.media_metadata) ||
+      comment.body,
     authorName: comment.author,
     authorApiId: comment.author,
     score: comment.score,

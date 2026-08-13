@@ -1,6 +1,6 @@
 {
   "name": "reddit-socialgata",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "description": "SocialGata plugin for Reddit",
   "author": "",
   "dependencies": {
@@ -15,18 +15,21 @@
   "scripts": {
     "build": "tsc && npm run build:options && npm run build:plugin",
     "build:options": "vite build --config vite.config.ts",
-    "build:plugin": "vite build --config plugin.vite.config.ts"
+    "build:plugin": "vite build --config plugin.vite.config.ts",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@infogata/socialgata-plugin-typings": "^0.13.0",
     "@preact/preset-vite": "^2.10.5",
     "@tailwindcss/vite": "^4.3.1",
     "@types/react": "^19.2.7",
+    "jsdom": "^29.1.1",
     "process": "^0.11.10",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.0.0",
     "util": "^0.12.5",
-    "vite": "^8.0.0"
+    "vite": "^8.0.0",
+    "vitest": "^4.1.10"
   },
   "browserslist": [
     "last 1 Chrome version"
