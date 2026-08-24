@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { MediaMetadataEntry, embedMedia } from "../media";
+import {
+  GalleryItem,
+  MediaMetadataEntry,
+  embedMedia,
+  galleryImages,
+} from "../media";
 
 /**
  * Fixtures mirror the shapes measured on a real thread
@@ -192,5 +197,143 @@ describe("embedMedia", () => {
     expect(doc.querySelector("script")).toBeNull();
     expect(doc.querySelectorAll("img")).toHaveLength(1);
     expect(doc.querySelector("img")!.getAttribute("src")).toBe(evil);
+  });
+});
+
+/**
+ * Gallery fixtures mirror r/bald posts measured live: `gallery_data.items`
+ * carries the display order and optional captions, `media_metadata` is a map
+ * whose key order does not match, and a failed upload sits in it as
+ * `status: "unprocessed"` with no urls at all.
+ */
+const galleryEntry = (id: string): MediaMetadataEntry => ({
+  status: "valid",
+  e: "Image",
+  m: "image/jpg",
+  id,
+  p: [108, 320, 640, 960].map((x) => ({
+    u: `https://preview.redd.it/${id}.jpg?width=${x}&crop=smart&auto=webp&s=s${x}`,
+    x,
+    y: x,
+  })),
+  s: { u: `https://preview.redd.it/${id}.jpg?width=2022&format=pjpg&s=full${id}`, x: 2022, y: 2022 },
+});
+
+const items = (...ids: string[]): GalleryItem[] =>
+  ids.map((media_id, i) => ({ media_id, id: 666522894 + i }));
+
+describe("galleryImages", () => {
+  it("returns every image, in gallery_data order rather than map order", () => {
+    // The map is deliberately built back-to-front.
+    const metadata = {
+      cccccccccccc1: galleryEntry("cccccccccccc1"),
+      bbbbbbbbbbbb1: galleryEntry("bbbbbbbbbbbb1"),
+      aaaaaaaaaaaa1: galleryEntry("aaaaaaaaaaaa1"),
+    };
+    const images = galleryImages(
+      items("aaaaaaaaaaaa1", "bbbbbbbbbbbb1", "cccccccccccc1"),
+      metadata
+    );
+
+    expect(images.map((i) => i.url)).toEqual([
+      "https://preview.redd.it/aaaaaaaaaaaa1.jpg?width=960&crop=smart&auto=webp&s=s960",
+      "https://preview.redd.it/bbbbbbbbbbbb1.jpg?width=960&crop=smart&auto=webp&s=s960",
+      "https://preview.redd.it/cccccccccccc1.jpg?width=960&crop=smart&auto=webp&s=s960",
+    ]);
+  });
+
+  it("keeps the signed query string byte-for-byte and carries dimensions", () => {
+    const [image] = galleryImages(items("aaaaaaaaaaaa1"), {
+      aaaaaaaaaaaa1: galleryEntry("aaaaaaaaaaaa1"),
+    });
+
+    expect(image.url).toContain("&s=s960");
+    expect(image.fullUrl).toBe(
+      "https://preview.redd.it/aaaaaaaaaaaa1.jpg?width=2022&format=pjpg&s=fullaaaaaaaaaaaa1"
+    );
+    expect(image.width).toBe(960);
+    expect(image.height).toBe(960);
+  });
+
+  it("decodes the html-escaped ampersands the live api sends without raw_json", () => {
+    const entry = galleryEntry("aaaaaaaaaaaa1");
+    entry.p = [
+      {
+        u: "https://preview.redd.it/aaaaaaaaaaaa1.jpg?width=960&amp;auto=webp&amp;s=sig",
+        x: 960,
+        y: 960,
+      },
+    ];
+    const [image] = galleryImages(items("aaaaaaaaaaaa1"), { aaaaaaaaaaaa1: entry });
+
+    expect(image.url).toBe(
+      "https://preview.redd.it/aaaaaaaaaaaa1.jpg?width=960&auto=webp&s=sig"
+    );
+  });
+
+  it("skips an unprocessed item without disturbing the ones around it", () => {
+    const images = galleryImages(
+      items("aaaaaaaaaaaa1", "deadbeefdead1", "cccccccccccc1"),
+      {
+        aaaaaaaaaaaa1: galleryEntry("aaaaaaaaaaaa1"),
+        deadbeefdead1: { status: "unprocessed" },
+        cccccccccccc1: galleryEntry("cccccccccccc1"),
+      }
+    );
+
+    expect(images).toHaveLength(2);
+    expect(images[0].url).toContain("aaaaaaaaaaaa1");
+    expect(images[1].url).toContain("cccccccccccc1");
+  });
+
+  it("keeps a real caption and drops the empty string reddit sends otherwise", () => {
+    const metadata = {
+      aaaaaaaaaaaa1: galleryEntry("aaaaaaaaaaaa1"),
+      cccccccccccc1: galleryEntry("cccccccccccc1"),
+    };
+    const images = galleryImages(
+      [
+        { media_id: "aaaaaaaaaaaa1", id: 1, caption: "before" },
+        { media_id: "cccccccccccc1", id: 2, caption: "" },
+      ],
+      metadata
+    );
+
+    expect(images[0].caption).toBe("before");
+    expect(images[1].caption).toBeUndefined();
+  });
+
+  it("takes an outbound_url as the image's link, ignoring a non-url", () => {
+    const metadata = {
+      aaaaaaaaaaaa1: galleryEntry("aaaaaaaaaaaa1"),
+      cccccccccccc1: galleryEntry("cccccccccccc1"),
+    };
+    const images = galleryImages(
+      [
+        { media_id: "aaaaaaaaaaaa1", id: 1, outbound_url: "https://example.com/buy" },
+        { media_id: "cccccccccccc1", id: 2, outbound_url: "javascript:alert(1)" },
+      ],
+      metadata
+    );
+
+    expect(images[0].linkUrl).toBe("https://example.com/buy");
+    expect(images[1].linkUrl).toBeUndefined();
+  });
+
+  it("uses the gif for an animated item, never its still preview frame", () => {
+    const [image] = galleryImages(items("7g8gd4ylwzih1"), {
+      "7g8gd4ylwzih1": gifEntry,
+    });
+
+    expect(image.url).toBe("https://i.redd.it/7g8gd4ylwzih1.gif");
+  });
+
+  it("returns nothing when the gallery's images have been deleted", () => {
+    // is_gallery stays true on a post whose media is gone, so the data is what
+    // has to be gated on.
+    expect(galleryImages(undefined, {})).toEqual([]);
+    expect(galleryImages([], {})).toEqual([]);
+    expect(galleryImages(items("aaaaaaaaaaaa1"), undefined)).toEqual([]);
+    expect(galleryImages(items("missingfromap1"), {})).toEqual([]);
   });
 });

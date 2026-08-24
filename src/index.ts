@@ -1,10 +1,12 @@
 import { MessageType, UiMessageType } from "./shared";
 import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
 import {
+  GalleryItem,
   IMAGE_URL_REGEX,
   MediaMetadataEntry,
   decodeHtmlEntities,
   embedMedia,
+  galleryImages,
   isValidUrl,
   largestUnder,
 } from "./media";
@@ -204,7 +206,7 @@ interface ListingChildPostData {
 }
 
 interface GalleryData {
-  items: { media_id: string; id: number }[];
+  items: GalleryItem[];
 }
 
 interface RedditMedia {
@@ -551,12 +553,16 @@ const getPreviewImage = (post: ListingChildPostData): string | undefined => {
 /**
  * Galleries carry no `preview` at all — their images only exist in
  * `media_metadata`, keyed by the ids listed in `gallery_data`.
+ *
+ * A crosspost of a gallery has no `gallery_data` of its own, the same way it
+ * has no `reddit_video`, so the parent is the fallback here as it is in
+ * {@link getVideoSources}.
  */
-const getGalleryImage = (post: ListingChildPostData): string | undefined => {
-  const mediaId = post.gallery_data?.items?.[0]?.media_id;
-  const media = mediaId ? post.media_metadata?.[mediaId] : undefined;
-  if (!media || media.status !== "valid") return undefined;
-  return largestUnder(media.p, (p) => p.x)?.u ?? media.s?.u;
+const getGalleryImages = (post: ListingChildPostData): PostImage[] => {
+  const source = post.gallery_data?.items?.length
+    ? post
+    : post.crosspost_parent_list?.[0];
+  return galleryImages(source?.gallery_data?.items, source?.media_metadata);
 };
 
 /**
@@ -564,10 +570,13 @@ const getGalleryImage = (post: ListingChildPostData): string | undefined => {
  * ("image", "default", "self", "nsfw", "spoiler") even when the listing carries
  * full image urls elsewhere. So it's the last resort, not the first.
  */
-const getThumbnailUrl = (post: ListingChildPostData): string | undefined => {
+const getThumbnailUrl = (
+  post: ListingChildPostData,
+  images: PostImage[]
+): string | undefined => {
   const url =
     getPreviewImage(post) ??
-    getGalleryImage(post) ??
+    images[0]?.url ??
     (IMAGE_URL_REGEX.test(post.url) ? post.url : undefined) ??
     (isValidUrl(post.thumbnail) ? post.thumbnail : undefined);
   return decodeHtmlEntities(url);
@@ -596,6 +605,7 @@ const getHeaders = (): HeadersInit => {
 const redditPostsToPost = (post: ListingChildPostData): Post => {
   const videoSources = getVideoSources(post);
   const isVideo = post.is_video || videoSources.length > 0;
+  const images = getGalleryImages(post);
   // A text post's `url` is its own permalink, which would make the title link
   // bounce out to Reddit instead of opening the post in the app.
   const isSelfPost = post.is_self || post.thumbnail === "self";
@@ -617,11 +627,12 @@ const redditPostsToPost = (post: ListingChildPostData): Post => {
     authorApiId: post.author,
     communityName: post.subreddit,
     communityApiId: post.subreddit,
-    thumbnailUrl: getThumbnailUrl(post),
+    thumbnailUrl: getThumbnailUrl(post, images),
     url: isSelfPost ? undefined : decodeHtmlEntities(post.url),
     originalUrl: `${REDDIT_PUBLIC_API_BASE}${post.permalink}`,
     isVideo,
     videoSources: videoSources.length > 0 ? videoSources : undefined,
+    images: images.length > 0 ? images : undefined,
     flair: post.link_flair_text || undefined,
     upvoteRatio: post.upvote_ratio,
     nsfw: post.over_18 || undefined,

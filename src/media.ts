@@ -69,7 +69,7 @@ export const largestUnder = <T>(
   items?.filter((i) => width(i) <= cap).sort((a, b) => width(b) - width(a))[0];
 
 /** One embeddable image resolved from a `media_metadata` entry. */
-interface EmbeddedMedia {
+export interface EmbeddedMedia {
   /** What the host shows inline. */
   src: string;
   /** Full resolution, shown when the reader expands. */
@@ -109,7 +109,7 @@ const giphyMedia = (key: string): EmbeddedMedia | undefined => {
   };
 };
 
-const mediaFromEntry = (
+export const mediaFromEntry = (
   key: string,
   entry: MediaMetadataEntry | undefined
 ): EmbeddedMedia | undefined => {
@@ -234,4 +234,52 @@ export const embedMedia = (
   }
 
   return changed ? doc.body.innerHTML : html;
+};
+
+/** One entry of `gallery_data.items`, in the order Reddit displays them. */
+export interface GalleryItem {
+  media_id: string;
+  id: number;
+  caption?: string;
+  outbound_url?: string;
+}
+
+/**
+ * A gallery's images, in display order.
+ *
+ * `gallery_data.items` is the ordered list and `media_metadata` an unordered
+ * map keyed by `media_id`, so the order can only come from the former — walking
+ * the map's keys would shuffle the gallery.
+ *
+ * Items whose upload never finished carry `status: "unprocessed"` with no urls
+ * at all; `mediaFromEntry` returns undefined for those and they are dropped
+ * rather than rendered as broken images.
+ *
+ * An `AnimatedImage` item resolves to its gif, which animates in an `<img>`.
+ * The smaller mp4 transcode `mediaFromEntry` also finds has nowhere to go in
+ * `PostImage`, so it is deliberately left behind here.
+ */
+export const galleryImages = (
+  items: GalleryItem[] | undefined,
+  metadata: Record<string, MediaMetadataEntry> | undefined
+): PostImage[] => {
+  if (!items?.length || !metadata) return [];
+
+  const images: PostImage[] = [];
+  for (const item of items) {
+    const media = mediaFromEntry(item.media_id, metadata[item.media_id]);
+    if (!media) continue;
+    images.push({
+      url: media.src,
+      fullUrl: media.full,
+      width: media.width,
+      height: media.height,
+      // Reddit sends "" for an item the author left uncaptioned.
+      caption: item.caption || undefined,
+      linkUrl: isValidUrl(item.outbound_url)
+        ? decodeHtmlEntities(item.outbound_url)
+        : undefined,
+    });
+  }
+  return images;
 };
