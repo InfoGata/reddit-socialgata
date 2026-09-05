@@ -11,6 +11,7 @@ const App = () => {
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [includeNsfwSearch, setIncludeNsfwSearch] = useState(true);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent<MessageType>) => {
@@ -19,6 +20,7 @@ const App = () => {
           setClientId(event.data.clientId);
           setClientSecret(event.data.clientSecret);
           setIsLoggedIn(event.data.isLoggedIn);
+          setIncludeNsfwSearch(event.data.includeNsfwSearch);
           break;
       }
     };
@@ -29,7 +31,7 @@ const App = () => {
   }, []);
 
   const saveCredentials = () => {
-    sendUiMessage({ type: "save", clientId, clientSecret });
+    sendUiMessage({ type: "save", clientId, clientSecret, includeNsfwSearch });
   };
 
   return (
@@ -80,6 +82,28 @@ const App = () => {
             setClientSecret(value);
           }}
         />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <h2 className="font-medium">Search</h2>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={includeNsfwSearch}
+            onChange={(e: any) => {
+              setIncludeNsfwSearch((e.target as HTMLInputElement).checked);
+            }}
+          />
+          <span>
+            Include NSFW posts in search results
+            <span className="block text-muted-foreground">
+              Reddit hides every over-18 post from search unless this is on, so
+              searching an adult community finds nothing with it off. Feeds are
+              unaffected either way.
+            </span>
+          </span>
+        </label>
       </div>
 
       <Button onClick={saveCredentials}>Save</Button>

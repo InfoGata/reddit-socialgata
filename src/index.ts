@@ -16,6 +16,7 @@ const REDDIT_PUBLIC_API_BASE = "https://www.reddit.com";
 const REDDIT_TOKEN_KEY = "reddit_access_token";
 const REDDIT_CLIENT_ID_KEY = "reddit_client_id";
 const REDDIT_CLIENT_SECRET_KEY = "reddit_client_secret";
+const REDDIT_NSFW_SEARCH_KEY = "reddit_include_nsfw_search";
 
 type RedditResponse = Listing;
 
@@ -802,6 +803,21 @@ const getCommunity = async (
 };
 
 /**
+ * Reddit's search endpoints drop every over-18 post unless `include_over_18=on`,
+ * so an entirely NSFW subreddit searches to zero hits without it. The plain
+ * listings never filtered, so this defaults to on to keep search and feed
+ * consistent; users who want search cleaned up turn it off in plugin options.
+ */
+const includeNsfwSearch = () =>
+  localStorage.getItem(REDDIT_NSFW_SEARCH_KEY) !== "false";
+
+const applyNsfwSearchParam = (url: URL) => {
+  if (includeNsfwSearch()) {
+    url.searchParams.append("include_over_18", "on");
+  }
+};
+
+/**
  * Searches within a single subreddit. `restrict_sr=1` is what keeps results
  * scoped to it — without it Reddit widens the search to the whole site.
  */
@@ -820,6 +836,7 @@ const searchCommunity = async (
   url.searchParams.append("q", request.query);
   url.searchParams.append("restrict_sr", "1");
   url.searchParams.append("type", "link");
+  applyNsfwSearchParam(url);
   url.searchParams.append("sort", sort.id);
   if (timeRangeId) {
     url.searchParams.append("t", timeRangeId);
@@ -977,6 +994,7 @@ const search = async (request: SearchRequest): Promise<SearchResponse> => {
   const url = new URL(`${baseUrl}${path}`);
   url.searchParams.append("q", request.query);
   url.searchParams.append("type", "link");
+  applyNsfwSearchParam(url);
   if (request.pageInfo?.page) {
     url.searchParams.append("after", String(request.pageInfo.page));
   }
@@ -1061,6 +1079,7 @@ const getInfo = async () => {
     clientId,
     clientSecret,
     isLoggedIn: hasLogin(),
+    includeNsfwSearch: includeNsfwSearch(),
   });
 };
 
@@ -1101,6 +1120,10 @@ application.onUiMessage = async (message: UiMessageType) => {
     case "save":
       localStorage.setItem(REDDIT_CLIENT_ID_KEY, message.clientId);
       localStorage.setItem(REDDIT_CLIENT_SECRET_KEY, message.clientSecret);
+      localStorage.setItem(
+        REDDIT_NSFW_SEARCH_KEY,
+        String(message.includeNsfwSearch)
+      );
       application.createNotification({ message: "Settings saved!" });
       break;
     default:
