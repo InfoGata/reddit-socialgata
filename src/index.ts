@@ -2,6 +2,7 @@ import { MessageType, UiMessageType } from "./shared";
 import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
 import { hostAllowsNsfw } from "./lib/nsfw";
 import { tokenRequestFor } from "./lib/token-request";
+import { consumeAuthState, issueAuthState } from "./lib/auth-state";
 import {
   GalleryItem,
   IMAGE_URL_REGEX,
@@ -17,6 +18,7 @@ const REDDIT_API_BASE = "https://oauth.reddit.com";
 const REDDIT_PUBLIC_API_BASE = "https://www.reddit.com";
 const REDDIT_TOKEN_KEY = "reddit_access_token";
 const REDDIT_REFRESH_TOKEN_KEY = "reddit_refresh_token";
+const REDDIT_AUTH_STATE_KEY = "reddit_auth_state";
 
 /**
  * The Reddit app SocialGata registers, so that connecting an account is one
@@ -1139,11 +1141,13 @@ const login = async (request: LoginRequest): Promise<LoginResponse | void> => {
     localStorage.setItem(REDDIT_CLIENT_SECRET_KEY, request.apiSecret);
   }
 
+  const state = issueAuthState(localStorage, REDDIT_AUTH_STATE_KEY);
+
   const url = new URL("https://www.reddit.com/api/v1/authorize");
   url.searchParams.append("client_id", activeClientId());
   url.searchParams.append("redirect_uri", getRedirectUri());
   url.searchParams.append("response_type", "code");
-  url.searchParams.append("state", "12345");
+  url.searchParams.append("state", state);
   // "permanent" is what makes Reddit issue a refresh token; without it the
   // login expires in an hour with no way back.
   url.searchParams.append("duration", "permanent");
@@ -1155,6 +1159,22 @@ const login = async (request: LoginRequest): Promise<LoginResponse | void> => {
 /** Handles the callback url the host relays back from the popup. */
 const loginCallback = async (request: LoginCallbackRequest): Promise<void> => {
   const callbackUrl = new URL(request.url);
+
+  // Checked before anything else is read, so a callback this plugin didn't
+  // start is discarded before its code is touched.
+  const stateOk = consumeAuthState(
+    localStorage,
+    REDDIT_AUTH_STATE_KEY,
+    callbackUrl.searchParams.get("state")
+  );
+  if (!stateOk) {
+    await application.createNotification({
+      message: "Reddit sign-in didn't match the request that started it, so it was stopped.",
+      type: "error",
+    });
+    return;
+  }
+
   const error = callbackUrl.searchParams.get("error");
   if (error) {
     await application.createNotification({
