@@ -1,6 +1,7 @@
 import { MessageType, UiMessageType } from "./shared";
 import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
 import { hostAllowsNsfw } from "./lib/nsfw";
+import { tokenRequestFor } from "./lib/token-request";
 import {
   GalleryItem,
   IMAGE_URL_REGEX,
@@ -15,6 +16,19 @@ import {
 const REDDIT_API_BASE = "https://oauth.reddit.com";
 const REDDIT_PUBLIC_API_BASE = "https://www.reddit.com";
 const REDDIT_TOKEN_KEY = "reddit_access_token";
+const REDDIT_REFRESH_TOKEN_KEY = "reddit_refresh_token";
+
+/**
+ * The Reddit app SocialGata registers, so that connecting an account is one
+ * button rather than a detour through Reddit's developer console.
+ *
+ * Reddit issues confidential clients only, so this id has a secret and a
+ * browser can't hold one. The secret lives in the token worker instead, which
+ * signs the exchange on our behalf; see requestToken. Anyone who would rather
+ * not route through it can supply their own id and secret, which then go
+ * straight to Reddit.
+ */
+const DEFAULT_CLIENT_ID = "5eb28aNZjc1A6ngOjxldwA";
 const REDDIT_CLIENT_ID_KEY = "reddit_client_id";
 const REDDIT_CLIENT_SECRET_KEY = "reddit_client_secret";
 const REDDIT_NSFW_SEARCH_KEY = "reddit_include_nsfw_search";
@@ -372,6 +386,93 @@ const resolveSort = (
 
 // State
 let accessToken = localStorage.getItem(REDDIT_TOKEN_KEY) || "";
+let refreshToken = localStorage.getItem(REDDIT_REFRESH_TOKEN_KEY) || "";
+
+/**
+ * The plugin renders on its own subdomain, but the OAuth popup is opened and
+ * read by the host page, so the redirect has to land on the host's origin.
+ * `pluginId.socialgata.com` -> `https://socialgata.com`.
+ */
+const getParentOrigin = (): string => {
+  const url = new URL(window.location.origin);
+  const parts = url.hostname.split(".");
+  parts.shift();
+  url.hostname = parts.join(".");
+  return url.origin;
+};
+
+const getRedirectUri = () => `${getParentOrigin()}/login_popup.html`;
+
+/**
+ * The reader's own Reddit app, if they registered one. Both halves are required:
+ * an id without a secret can't complete an exchange, and falling back to the
+ * built-in app is better than failing.
+ */
+const ownCredentials = (): { clientId: string; clientSecret: string } | undefined => {
+  const clientId = localStorage.getItem(REDDIT_CLIENT_ID_KEY);
+  const clientSecret = localStorage.getItem(REDDIT_CLIENT_SECRET_KEY);
+  return clientId && clientSecret ? { clientId, clientSecret } : undefined;
+};
+
+const activeClientId = () => ownCredentials()?.clientId ?? DEFAULT_CLIENT_ID;
+
+interface TokenResponse {
+  access_token?: string;
+  refresh_token?: string;
+  error?: string;
+}
+
+/**
+ * Exchanges `params` for a token, sending it wherever the secret for the active
+ * client lives.
+ *
+ * Own credentials go straight to Reddit, which is CORS-enabled and accepts the
+ * Basic header from a browser. The built-in app's secret exists only inside the
+ * token worker, so that exchange is posted there with `?basic` and the worker
+ * adds the header itself. Either way no extension is involved, which is the
+ * point: an authenticated reader never touches the public endpoints that get
+ * blocked.
+ */
+const requestToken = async (params: URLSearchParams): Promise<TokenResponse> => {
+  const { url, headers, body } = tokenRequestFor(
+    params,
+    ownCredentials(),
+    DEFAULT_CLIENT_ID
+  );
+  const response = await fetch(url, { method: "POST", body, headers });
+  return (await response.json()) as TokenResponse;
+};
+
+const storeTokens = (token: TokenResponse) => {
+  if (token.access_token) {
+    accessToken = token.access_token;
+    localStorage.setItem(REDDIT_TOKEN_KEY, token.access_token);
+  }
+  // Only sent when the grant was `permanent`, and absent from a refresh
+  // response, so the stored one has to survive a refresh that doesn't reissue it.
+  if (token.refresh_token) {
+    refreshToken = token.refresh_token;
+    localStorage.setItem(REDDIT_REFRESH_TOKEN_KEY, token.refresh_token);
+  }
+};
+
+/**
+ * Reddit's access tokens last an hour, so a login is otherwise good for an hour
+ * and then silently starts failing.
+ */
+const refreshAccessToken = async (): Promise<boolean> => {
+  if (!refreshToken) return false;
+  const params = new URLSearchParams();
+  params.append("grant_type", "refresh_token");
+  params.append("refresh_token", refreshToken);
+  try {
+    const token = await requestToken(params);
+    storeTokens(token);
+    return !!token.access_token;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Reasons Reddit gives for a 403 that mean "you may not have this", as opposed
@@ -452,11 +553,24 @@ const httpRequest = async (url: string, init?: RequestInit) => {
   requestUrl.searchParams.set("raw_json", "1");
   const finalUrl = requestUrl.toString();
 
+  const send = async (requestInit?: RequestInit) =>
+    (await application.isNetworkRequestCorsDisabled())
+      ? await application.networkRequest(finalUrl, requestInit)
+      : await fetch(finalUrl, requestInit);
+
   let response: Response;
   try {
-    response = (await application.isNetworkRequestCorsDisabled())
-      ? await application.networkRequest(finalUrl, init)
-      : await fetch(finalUrl, init);
+    response = await send(init);
+    // Reddit's access tokens last an hour, so a session left open overnight
+    // starts returning 401 on every read. Refresh once and replay rather than
+    // making the reader reconnect; the header in `init` still carries the token
+    // from before the refresh, hence rebuilding it.
+    if (response.status === 401 && (await refreshAccessToken())) {
+      response = await send({
+        ...init,
+        headers: { ...(init?.headers as Record<string, string>), ...getHeaders() },
+      });
+    }
   } catch (error) {
     // The host classifies its own failures; anything else never reached Reddit.
     if (isPluginErrorLike(error)) throw error;
@@ -1011,64 +1125,75 @@ const search = async (request: SearchRequest): Promise<SearchResponse> => {
   return fetchPostListing(url);
 };
 
-const login = async (request: LoginRequest): Promise<void> => {
-  const tokenUrl = "https://www.reddit.com/api/v1/access_token";
-  const redirectUri = `${window.location.origin}/login_popup.html`;
-  const authUrl = "https://www.reddit.com/api/v1/authorize";
-  const responseType = "code";
-  const state = "12345";
-  const scope = "read history";
-  const duration = "permanent";
+/**
+ * Starts the OAuth flow. The host has already opened a blank popup and passes
+ * its name, so this only builds the url and hands it back for the host to
+ * navigate; the callback arrives via onLoginCallback.
+ *
+ * Credentials supplied by the host are persisted here rather than used once,
+ * because a refresh an hour from now has to reach the same client.
+ */
+const login = async (request: LoginRequest): Promise<LoginResponse | void> => {
+  if (request.apiKey && request.apiSecret) {
+    localStorage.setItem(REDDIT_CLIENT_ID_KEY, request.apiKey);
+    localStorage.setItem(REDDIT_CLIENT_SECRET_KEY, request.apiSecret);
+  }
 
-  const url = new URL(authUrl);
-  url.searchParams.append("redirect_uri", redirectUri);
-  url.searchParams.append("client_id", request.apiKey);
-  url.searchParams.append("state", state);
-  url.searchParams.append("response_type", responseType);
-  url.searchParams.append("duration", duration);
-  url.searchParams.append("scope", scope);
+  const url = new URL("https://www.reddit.com/api/v1/authorize");
+  url.searchParams.append("client_id", activeClientId());
+  url.searchParams.append("redirect_uri", getRedirectUri());
+  url.searchParams.append("response_type", "code");
+  url.searchParams.append("state", "12345");
+  // "permanent" is what makes Reddit issue a refresh token; without it the
+  // login expires in an hour with no way back.
+  url.searchParams.append("duration", "permanent");
+  url.searchParams.append("scope", "read history");
 
-  const newWindow = window.open(url);
+  return { url: url.toString() };
+};
 
-  return new Promise((resolve) => {
-    const onMessage = async (returnUrl: string) => {
-      const codeUrl = new URL(returnUrl);
-      const code = codeUrl.searchParams.get("code");
-      if (code) {
-        const auth = btoa(`${request.apiKey}:${request.apiSecret}`);
-        const params = new URLSearchParams();
-        params.append("code", code);
-        params.append("grant_type", "authorization_code");
-        params.append("redirect_uri", redirectUri);
-        const response = await fetch(tokenUrl, {
-          method: "POST",
-          body: params.toString(),
-          headers: {
-            "Content-type": "application/x-www-form-urlencoded",
-            Authorization: `Basic ${auth}`,
-          },
-        });
-        const json = await response.json();
-        accessToken = json.access_token;
-        localStorage.setItem(REDDIT_TOKEN_KEY, json.access_token);
-        resolve();
-      }
-      if (newWindow) {
-        newWindow.close();
-      }
-    };
+/** Handles the callback url the host relays back from the popup. */
+const loginCallback = async (request: LoginCallbackRequest): Promise<void> => {
+  const callbackUrl = new URL(request.url);
+  const error = callbackUrl.searchParams.get("error");
+  if (error) {
+    await application.createNotification({
+      message: `Reddit sign-in failed: ${error}`,
+      type: "error",
+    });
+    return;
+  }
 
-    window.onmessage = (event: MessageEvent) => {
-      if (event.source === newWindow) {
-        onMessage(event.data.url);
-      }
-    };
-  });
+  const code = callbackUrl.searchParams.get("code");
+  if (!code) {
+    await application.createNotification({
+      message: "Reddit didn't return an authorization code.",
+      type: "error",
+    });
+    return;
+  }
+
+  const params = new URLSearchParams();
+  params.append("grant_type", "authorization_code");
+  params.append("code", code);
+  params.append("redirect_uri", getRedirectUri());
+
+  const token = await requestToken(params);
+  if (!token.access_token) {
+    await application.createNotification({
+      message: `Reddit rejected the sign-in${token.error ? `: ${token.error}` : "."}`,
+      type: "error",
+    });
+    return;
+  }
+  storeTokens(token);
 };
 
 const logout = async (): Promise<void> => {
   accessToken = "";
+  refreshToken = "";
   localStorage.removeItem(REDDIT_TOKEN_KEY);
+  localStorage.removeItem(REDDIT_REFRESH_TOKEN_KEY);
 };
 
 const isLoggedIn = async (): Promise<boolean> => {
@@ -1117,6 +1242,7 @@ application.onGetUser = getUser;
 application.onSearch = search;
 application.onSearchCommunity = searchCommunity;
 application.onLogin = login;
+application.onLoginCallback = loginCallback;
 application.onLogout = logout;
 application.onIsLoggedIn = isLoggedIn;
 application.onGetPlatformType = async () => "forum";

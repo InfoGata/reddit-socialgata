@@ -30,6 +30,16 @@ const App = () => {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
+  // The options page renders on the plugin's own subdomain while the OAuth
+  // popup lands on the host's, so the uri to register is the parent's.
+  const parentOrigin = (() => {
+    const url = new URL(window.location.origin);
+    const parts = url.hostname.split(".");
+    parts.shift();
+    url.hostname = parts.join(".");
+    return url.origin;
+  })();
+
   const saveCredentials = () => {
     sendUiMessage({ type: "save", clientId, clientSecret, includeNsfwSearch });
   };
@@ -51,11 +61,19 @@ const App = () => {
       <div className="flex flex-col gap-2">
         <h2 className="font-medium">Reddit API Credentials (Optional)</h2>
         <p className="text-sm text-muted-foreground">
-          For authenticated access, create a Reddit app at{" "}
+          Leave these blank to sign in with SocialGata's own Reddit app, which
+          is what most people want. The sign-in itself is the same either way;
+          only the app Reddit attributes it to changes.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          To use your own instead, create an app at{" "}
           <a href="https://www.reddit.com/prefs/apps" target="_blank">
             reddit.com/prefs/apps
           </a>
-          {" "}and enter the credentials below.
+          , set its redirect uri to{" "}
+          <code className="text-xs">{`${parentOrigin}/login_popup.html`}</code>,
+          and enter both values below. Both are required — an id on its own
+          falls back to the built-in app.
         </p>
       </div>
 
