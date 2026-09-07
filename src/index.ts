@@ -1,5 +1,6 @@
 import { MessageType, UiMessageType } from "./shared";
 import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
+import { hostAllowsNsfw } from "./lib/nsfw";
 import {
   GalleryItem,
   IMAGE_URL_REGEX,
@@ -55,6 +56,7 @@ interface ListingChildSubreddit {
     subscribers: number;
     url: string;
     title: string;
+    over_18?: boolean;
   };
 }
 
@@ -811,8 +813,14 @@ const getCommunity = async (
 const includeNsfwSearch = () =>
   localStorage.getItem(REDDIT_NSFW_SEARCH_KEY) !== "false";
 
-const applyNsfwSearchParam = (url: URL) => {
-  if (includeNsfwSearch()) {
+/**
+ * The two controls compose as an AND, and only in the restrictive direction:
+ * the plugin option can clean up search on its own, and the host preference
+ * overrides it when the reader has asked for adult content to be left out
+ * everywhere. Neither can turn the other back on.
+ */
+const applyNsfwSearchParam = async (url: URL) => {
+  if (includeNsfwSearch() && (await hostAllowsNsfw())) {
     url.searchParams.append("include_over_18", "on");
   }
 };
@@ -836,7 +844,7 @@ const searchCommunity = async (
   url.searchParams.append("q", request.query);
   url.searchParams.append("restrict_sr", "1");
   url.searchParams.append("type", "link");
-  applyNsfwSearchParam(url);
+  await applyNsfwSearchParam(url);
   url.searchParams.append("sort", sort.id);
   if (timeRangeId) {
     url.searchParams.append("t", timeRangeId);
@@ -976,6 +984,7 @@ const getCommunities = async (
       name: c.data.display_name,
       description: c.data.public_description,
       originalUrl: `https://www.reddit.com${c.data.url}`,
+      nsfw: c.data.over_18 || undefined,
     }));
 
   return {
@@ -994,7 +1003,7 @@ const search = async (request: SearchRequest): Promise<SearchResponse> => {
   const url = new URL(`${baseUrl}${path}`);
   url.searchParams.append("q", request.query);
   url.searchParams.append("type", "link");
-  applyNsfwSearchParam(url);
+  await applyNsfwSearchParam(url);
   if (request.pageInfo?.page) {
     url.searchParams.append("after", String(request.pageInfo.page));
   }
