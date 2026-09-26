@@ -892,6 +892,17 @@ const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
   };
 };
 
+/**
+ * The listing endpoints don't describe the subreddit, so this is built from the
+ * request alone. `name` stays the api id to match what the app falls back to,
+ * keeping a favorite made from the header identical to one made elsewhere.
+ */
+const subredditCommunity = (apiId: string) => ({
+  apiId,
+  name: apiId,
+  originalUrl: `${REDDIT_PUBLIC_API_BASE}/r/${apiId}/`,
+});
+
 const getCommunity = async (
   request: GetCommunityRequest
 ): Promise<GetCommunityResponse> => {
@@ -914,6 +925,7 @@ const getCommunity = async (
 
   return {
     ...(await fetchPostListing(url)),
+    community: subredditCommunity(request.apiId),
     sortOptions: LISTING_SORTS,
     sortId: sort.id,
     timeRangeId,
@@ -971,6 +983,7 @@ const searchCommunity = async (
 
   return {
     ...(await fetchPostListing(url)),
+    community: subredditCommunity(request.communityApiId),
     sortOptions: SEARCH_SORTS,
     sortId: sort.id,
     timeRangeId,
