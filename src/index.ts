@@ -2,6 +2,7 @@ import { MessageType, UiMessageType } from "./shared";
 import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
 import { hostAllowsNsfw } from "./lib/nsfw";
 import { tokenRequestFor } from "./lib/token-request";
+import { AppTokenResponse, createAppTokenCache } from "./lib/app-token";
 import { consumeAuthState, issueAuthState } from "./lib/auth-state";
 import {
   GalleryItem,
@@ -19,6 +20,7 @@ const REDDIT_PUBLIC_API_BASE = "https://www.reddit.com";
 const REDDIT_TOKEN_KEY = "reddit_access_token";
 const REDDIT_REFRESH_TOKEN_KEY = "reddit_refresh_token";
 const REDDIT_AUTH_STATE_KEY = "reddit_auth_state";
+const REDDIT_APP_TOKEN_KEY = "reddit_app_token";
 
 /**
  * The Reddit app SocialGata registers, so that connecting an account is one
@@ -431,9 +433,7 @@ interface TokenResponse {
  * Own credentials go straight to Reddit, which is CORS-enabled and accepts the
  * Basic header from a browser. The built-in app's secret exists only inside the
  * token worker, so that exchange is posted there with `?basic` and the worker
- * adds the header itself. Either way no extension is involved, which is the
- * point: an authenticated reader never touches the public endpoints that get
- * blocked.
+ * adds the header itself. Either way no extension is involved.
  */
 const requestToken = async (params: URLSearchParams): Promise<TokenResponse> => {
   const { url, headers, body } = tokenRequestFor(
@@ -444,6 +444,39 @@ const requestToken = async (params: URLSearchParams): Promise<TokenResponse> => 
   const response = await fetch(url, { method: "POST", body, headers });
   return (await response.json()) as TokenResponse;
 };
+
+/**
+ * A userless token for reading without a login; see lib/app-token. Goes through
+ * the same client as sign-in, so a reader's own app pays for their reads too.
+ */
+const mintAppToken = async (): Promise<AppTokenResponse> => {
+  const params = new URLSearchParams();
+  params.append("grant_type", "client_credentials");
+  const { url, headers, body } = tokenRequestFor(
+    params,
+    ownCredentials(),
+    DEFAULT_CLIENT_ID
+  );
+  const response = await fetch(url, { method: "POST", body, headers });
+  if (!response.ok) {
+    throw new PluginRequestError({
+      code: response.status === 429 ? "rate-limited" : "unauthorized",
+      message:
+        response.status === 429
+          ? "Too many requests for a Reddit access token. Try again in a minute."
+          : `Couldn't get an access token from Reddit (${response.status}).`,
+      status: response.status,
+      requestUrl: sanitizeUrl(url),
+    });
+  }
+  return (await response.json()) as AppTokenResponse;
+};
+
+const appToken = createAppTokenCache(
+  mintAppToken,
+  localStorage,
+  REDDIT_APP_TOKEN_KEY
+);
 
 const storeTokens = (token: TokenResponse) => {
   if (token.access_token) {
@@ -484,9 +517,9 @@ const FORBIDDEN_REASONS = ["private", "quarantined", "banned", "gold_only"];
 
 /**
  * Turns a failed response into an error the app can explain. The 403 split is
- * the important part: Reddit answers 403 both for a private subreddit and for a
- * request carrying no session cookies, and only the second is worth telling
- * someone to go open reddit.com about.
+ * the important part: Reddit answers 403 both for a private subreddit and with
+ * a "blocked by network security" page, and only the first is about the thing
+ * being asked for.
  */
 const responseError = async (
   response: Response,
@@ -517,7 +550,7 @@ const responseError = async (
     return new PluginRequestError({
       code: "blocked",
       message:
-        "Reddit refused the request (403). Reddit blocks requests that don't carry a browser session.",
+        "Reddit refused the request (403) without saying why.",
       status,
       requestUrl,
     });
@@ -555,10 +588,22 @@ const httpRequest = async (url: string, init?: RequestInit) => {
   requestUrl.searchParams.set("raw_json", "1");
   const finalUrl = requestUrl.toString();
 
-  const send = async (requestInit?: RequestInit) =>
-    (await application.isNetworkRequestCorsDisabled())
-      ? await application.networkRequest(finalUrl, requestInit)
-      : await fetch(finalUrl, requestInit);
+  // Without a login every read carries the app token instead; Reddit no
+  // longer answers anonymous requests at all.
+  const send = async (requestInit?: RequestInit) => {
+    const authorized = hasLogin()
+      ? requestInit
+      : {
+          ...requestInit,
+          headers: {
+            ...(requestInit?.headers as Record<string, string>),
+            Authorization: `Bearer ${await appToken.get()}`,
+          },
+        };
+    return (await application.isNetworkRequestCorsDisabled())
+      ? await application.networkRequest(finalUrl, authorized)
+      : await fetch(finalUrl, authorized);
+  };
 
   let response: Response;
   try {
@@ -567,11 +612,19 @@ const httpRequest = async (url: string, init?: RequestInit) => {
     // starts returning 401 on every read. Refresh once and replay rather than
     // making the reader reconnect; the header in `init` still carries the token
     // from before the refresh, hence rebuilding it.
-    if (response.status === 401 && (await refreshAccessToken())) {
-      response = await send({
-        ...init,
-        headers: { ...(init?.headers as Record<string, string>), ...getHeaders() },
-      });
+    if (response.status === 401) {
+      if (!hasLogin()) {
+        appToken.invalidate();
+        response = await send(init);
+      } else if (await refreshAccessToken()) {
+        response = await send({
+          ...init,
+          headers: {
+            ...(init?.headers as Record<string, string>),
+            ...getHeaders(),
+          },
+        });
+      }
     }
   } catch (error) {
     // The host classifies its own failures; anything else never reached Reddit.
@@ -703,14 +756,6 @@ const getThumbnailUrl = (
 
 const hasLogin = () => {
   return !!accessToken;
-};
-
-const getBaseUrl = () => {
-  if (hasLogin()) {
-    return REDDIT_API_BASE;
-  } else {
-    return REDDIT_PUBLIC_API_BASE;
-  }
 };
 
 const getHeaders = (): HeadersInit => {
@@ -852,7 +897,7 @@ const getFeedTypes = (): FeedType[] => {
 };
 
 const getFeed = async (request?: GetFeedRequest): Promise<GetFeedResponse> => {
-  const baseUrl = getBaseUrl();
+  const baseUrl = REDDIT_API_BASE;
 
   const feedTypes = getFeedTypes();
   const feedTypeId =
@@ -906,7 +951,7 @@ const subredditCommunity = (apiId: string) => ({
 const getCommunity = async (
   request: GetCommunityRequest
 ): Promise<GetCommunityResponse> => {
-  const baseUrl = getBaseUrl();
+  const baseUrl = REDDIT_API_BASE;
 
   const { sort, timeRangeId } = resolveSort(
     LISTING_SORTS,
@@ -967,7 +1012,7 @@ const searchCommunity = async (
   );
 
   const url = new URL(
-    `${getBaseUrl()}/r/${request.communityApiId}/search.json`
+    `${REDDIT_API_BASE}/r/${request.communityApiId}/search.json`
   );
   url.searchParams.append("q", request.query);
   url.searchParams.append("restrict_sr", "1");
@@ -994,7 +1039,7 @@ const getComments = async (
   request: GetCommentsRequest
 ): Promise<GetCommentsResponse> => {
   const headers = getHeaders();
-  const baseUrl = getBaseUrl();
+  const baseUrl = REDDIT_API_BASE;
   // The subreddit prefix is optional on this endpoint, so requests that only
   // know the post id (favorites, comment permalinks) still work.
   const subredditPath = request.communityId ? `/r/${request.communityId}` : "";
@@ -1056,7 +1101,7 @@ const getComments = async (
 
 const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   const headers = getHeaders();
-  const baseUrl = getBaseUrl();
+  const baseUrl = REDDIT_API_BASE;
 
   const { sort, timeRangeId } = resolveSort(
     USER_SORTS,
@@ -1093,7 +1138,7 @@ const getCommunities = async (
   request: GetCommunitiesRequest
 ): Promise<GetCommunitiesResponse> => {
   const headers = getHeaders();
-  const baseUrl = getBaseUrl();
+  const baseUrl = REDDIT_API_BASE;
   const url = new URL(`${baseUrl}/subreddits/popular.json`);
   if (request?.pageInfo?.page) {
     url.searchParams.append("after", String(request.pageInfo.page));
@@ -1126,7 +1171,7 @@ const getCommunities = async (
 };
 
 const search = async (request: SearchRequest): Promise<SearchResponse> => {
-  const baseUrl = getBaseUrl();
+  const baseUrl = REDDIT_API_BASE;
   const path = "/search.json";
 
   const url = new URL(`${baseUrl}${path}`);
