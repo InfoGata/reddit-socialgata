@@ -2,7 +2,11 @@ import { MessageType, UiMessageType } from "./shared";
 import { PluginRequestError, isPluginErrorLike, sanitizeUrl } from "./errors";
 import { hostAllowsNsfw } from "./lib/nsfw";
 import { tokenRequestFor } from "./lib/token-request";
-import { AppTokenResponse, createAppTokenCache } from "./lib/app-token";
+import {
+  AppTokenResponse,
+  MintBackoff,
+  createAppTokenCache,
+} from "./lib/app-token";
 import { consumeAuthState, issueAuthState } from "./lib/auth-state";
 import {
   GalleryItem,
@@ -457,14 +461,32 @@ const mintAppToken = async (): Promise<AppTokenResponse> => {
     ownCredentials(),
     DEFAULT_CLIENT_ID
   );
-  const response = await fetch(url, { method: "POST", body, headers });
+  const send = () => fetch(url, { method: "POST", body, headers });
+  let response = await send();
+  // Two different 429s arrive here. The token worker's own limit sends a
+  // Retry-After it exposes to us, and is worth waiting out. Reddit's token
+  // endpoint passes through as a 429 too, but intermittently and with no
+  // readable Retry-After, so that one is just asked again once.
+  const retryAfter = () => Number(response.headers.get("Retry-After"));
+  if (response.status === 429 && !(retryAfter() > 0)) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    response = await send();
+  }
+  if (response.status === 429 && retryAfter() > 0) {
+    throw new MintBackoff(retryAfter());
+  }
+  if (response.status === 429) {
+    throw new PluginRequestError({
+      code: "rate-limited",
+      message: "Reddit is turning away access token requests right now. Try again shortly.",
+      status: response.status,
+      requestUrl: sanitizeUrl(url),
+    });
+  }
   if (!response.ok) {
     throw new PluginRequestError({
-      code: response.status === 429 ? "rate-limited" : "unauthorized",
-      message:
-        response.status === 429
-          ? "Too many requests for a Reddit access token. Try again in a minute."
-          : `Couldn't get an access token from Reddit (${response.status}).`,
+      code: "unauthorized",
+      message: `Couldn't get an access token from Reddit (${response.status}).`,
       status: response.status,
       requestUrl: sanitizeUrl(url),
     });
@@ -475,7 +497,13 @@ const mintAppToken = async (): Promise<AppTokenResponse> => {
 const appToken = createAppTokenCache(
   mintAppToken,
   localStorage,
-  REDDIT_APP_TOKEN_KEY
+  REDDIT_APP_TOKEN_KEY,
+  (secondsLeft) =>
+    new PluginRequestError({
+      code: "rate-limited",
+      message: `Too many requests for a Reddit access token. Try again in ${secondsLeft}s.`,
+      status: 429,
+    })
 );
 
 const storeTokens = (token: TokenResponse) => {

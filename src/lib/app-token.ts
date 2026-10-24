@@ -17,6 +17,17 @@ export interface AppTokenResponse {
   expires_in?: number;
 }
 
+/**
+ * Thrown by a mint that was refused for asking too often. The cache holds off
+ * for this long, so retries in the meantime fail at once instead of asking
+ * again and keeping the limit's window full.
+ */
+export class MintBackoff extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super(`Retry after ${retryAfterSeconds}s`);
+  }
+}
+
 interface StoredAppToken {
   token: string;
   expiresAt: number;
@@ -38,8 +49,13 @@ export const createAppTokenCache = (
   mint: () => Promise<AppTokenResponse>,
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem">,
   storageKey: string,
+  /** The error to fail with while backing off, given the seconds left. */
+  backingOff: (secondsLeft: number) => Error,
   now: () => number = Date.now
 ): AppTokenCache => {
+  // Kept in storage rather than memory so a reload, or another frame of the
+  // plugin, honours it too.
+  const backoffKey = `${storageKey}_backoff_until`;
   const read = (): StoredAppToken | undefined => {
     try {
       const parsed = JSON.parse(storage.getItem(storageKey) ?? "null");
@@ -64,9 +80,23 @@ export const createAppTokenCache = (
     if (stored && stored.expiresAt - EXPIRY_MARGIN_MS > now()) {
       return stored.token;
     }
+    const backoffUntil = Number(storage.getItem(backoffKey));
+    if (backoffUntil > now()) {
+      throw backingOff(Math.ceil((backoffUntil - now()) / 1000));
+    }
     pending ??= (async () => {
       try {
-        const response = await mint();
+        let response: AppTokenResponse;
+        try {
+          response = await mint();
+        } catch (error) {
+          if (!(error instanceof MintBackoff)) throw error;
+          storage.setItem(
+            backoffKey,
+            String(now() + error.retryAfterSeconds * 1000)
+          );
+          throw backingOff(error.retryAfterSeconds);
+        }
         if (!response.access_token) {
           throw new Error("Reddit did not issue an app token.");
         }

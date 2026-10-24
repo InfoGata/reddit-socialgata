@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAppTokenCache } from "../lib/app-token";
+import { MintBackoff, createAppTokenCache } from "../lib/app-token";
 
 const KEY = "reddit_app_token";
+const backingOff = (secondsLeft: number) =>
+  new Error(`backing off ${secondsLeft}s`);
 
 const memoryStorage = () => {
   const map = new Map<string, string>();
@@ -19,7 +21,7 @@ describe("createAppTokenCache", () => {
       .fn()
       .mockResolvedValueOnce({ access_token: "first", expires_in: 3600 })
       .mockResolvedValueOnce({ access_token: "second", expires_in: 3600 });
-    const cache = createAppTokenCache(mint, memoryStorage(), KEY, () => time);
+    const cache = createAppTokenCache(mint, memoryStorage(), KEY, backingOff, () => time);
 
     expect(await cache.get()).toBe("first");
     time = 50 * 60 * 1000;
@@ -32,7 +34,7 @@ describe("createAppTokenCache", () => {
 
   it("shares one mint between reads that arrive together", async () => {
     const mint = vi.fn().mockResolvedValue({ access_token: "t", expires_in: 3600 });
-    const cache = createAppTokenCache(mint, memoryStorage(), KEY);
+    const cache = createAppTokenCache(mint, memoryStorage(), KEY, backingOff);
 
     const tokens = await Promise.all([cache.get(), cache.get(), cache.get()]);
     expect(tokens).toEqual(["t", "t", "t"]);
@@ -42,8 +44,8 @@ describe("createAppTokenCache", () => {
   it("survives a reload through storage", async () => {
     const storage = memoryStorage();
     const mint = vi.fn().mockResolvedValue({ access_token: "t", expires_in: 3600 });
-    await createAppTokenCache(mint, storage, KEY).get();
-    await createAppTokenCache(mint, storage, KEY).get();
+    await createAppTokenCache(mint, storage, KEY, backingOff).get();
+    await createAppTokenCache(mint, storage, KEY, backingOff).get();
     expect(mint).toHaveBeenCalledTimes(1);
   });
 
@@ -52,7 +54,7 @@ describe("createAppTokenCache", () => {
       .fn()
       .mockResolvedValueOnce({ access_token: "rejected", expires_in: 3600 })
       .mockResolvedValueOnce({ access_token: "fresh", expires_in: 3600 });
-    const cache = createAppTokenCache(mint, memoryStorage(), KEY);
+    const cache = createAppTokenCache(mint, memoryStorage(), KEY, backingOff);
 
     await cache.get();
     cache.invalidate();
@@ -64,7 +66,7 @@ describe("createAppTokenCache", () => {
       .fn()
       .mockRejectedValueOnce(new Error("429"))
       .mockResolvedValueOnce({ access_token: "t", expires_in: 3600 });
-    const cache = createAppTokenCache(mint, memoryStorage(), KEY);
+    const cache = createAppTokenCache(mint, memoryStorage(), KEY, backingOff);
 
     await expect(cache.get()).rejects.toThrow("429");
     expect(await cache.get()).toBe("t");
@@ -72,7 +74,42 @@ describe("createAppTokenCache", () => {
 
   it("treats a response without a token as a failure", async () => {
     const mint = vi.fn().mockResolvedValue({ error: "invalid_client" });
-    const cache = createAppTokenCache(mint, memoryStorage(), KEY);
+    const cache = createAppTokenCache(mint, memoryStorage(), KEY, backingOff);
     await expect(cache.get()).rejects.toThrow();
+  });
+
+  it("stops asking while a rate limit's Retry-After runs", async () => {
+    let time = 0;
+    const mint = vi
+      .fn()
+      .mockRejectedValueOnce(new MintBackoff(60))
+      .mockResolvedValueOnce({ access_token: "t", expires_in: 3600 });
+    const cache = createAppTokenCache(mint, memoryStorage(), KEY, backingOff, () => time);
+
+    await expect(cache.get()).rejects.toThrow("backing off 60s");
+    time = 45 * 1000;
+    // Fails at once with the time left, without asking again.
+    await expect(cache.get()).rejects.toThrow("backing off 15s");
+    expect(mint).toHaveBeenCalledTimes(1);
+
+    time = 61 * 1000;
+    expect(await cache.get()).toBe("t");
+    expect(mint).toHaveBeenCalledTimes(2);
+  });
+
+  it("honours a backoff left by another load of the plugin", async () => {
+    let time = 0;
+    const storage = memoryStorage();
+    const first = vi.fn().mockRejectedValue(new MintBackoff(30));
+    await expect(
+      createAppTokenCache(first, storage, KEY, backingOff, () => time).get()
+    ).rejects.toThrow();
+
+    const second = vi.fn();
+    time = 10 * 1000;
+    await expect(
+      createAppTokenCache(second, storage, KEY, backingOff, () => time).get()
+    ).rejects.toThrow("backing off 20s");
+    expect(second).not.toHaveBeenCalled();
   });
 });
