@@ -1199,6 +1199,12 @@ const getCommunities = async (
 };
 
 const search = async (request: SearchRequest): Promise<SearchResponse> => {
+  const { sort, timeRangeId } = resolveSort(
+    SEARCH_SORTS,
+    request.sortId,
+    request.timeRangeId
+  );
+
   const baseUrl = REDDIT_API_BASE;
   const path = "/search.json";
 
@@ -1206,11 +1212,20 @@ const search = async (request: SearchRequest): Promise<SearchResponse> => {
   url.searchParams.append("q", request.query);
   url.searchParams.append("type", "link");
   await applyNsfwSearchParam(url);
+  url.searchParams.append("sort", sort.id);
+  if (timeRangeId) {
+    url.searchParams.append("t", timeRangeId);
+  }
   if (request.pageInfo?.page) {
     url.searchParams.append("after", String(request.pageInfo.page));
   }
 
-  return fetchPostListing(url);
+  return {
+    ...(await fetchPostListing(url)),
+    sortOptions: SEARCH_SORTS,
+    sortId: sort.id,
+    timeRangeId,
+  };
 };
 
 /**
