@@ -1006,6 +1006,35 @@ const getCommunity = async (
 };
 
 /**
+ * Posts linking to one site, old Reddit's `/domain/github.com/`. Same listing
+ * envelope and sorts as a subreddit.
+ */
+const getDomain = async (
+  request: GetDomainRequest
+): Promise<GetDomainResponse> => {
+  const { sort, timeRangeId } = resolveSort(
+    LISTING_SORTS,
+    request.sortId,
+    request.timeRangeId
+  );
+  const domain = encodeURIComponent(request.domain.toLowerCase());
+  const url = new URL(`${REDDIT_API_BASE}/domain/${domain}/${sort.id}.json`);
+  if (request.pageInfo?.page) {
+    url.searchParams.append("after", String(request.pageInfo.page));
+  }
+  if (timeRangeId) {
+    url.searchParams.append("t", timeRangeId);
+  }
+
+  return {
+    ...(await fetchPostListing(url)),
+    sortOptions: LISTING_SORTS,
+    sortId: sort.id,
+    timeRangeId,
+  };
+};
+
+/**
  * Reddit's search endpoints drop every over-18 post unless `include_over_18=on`,
  * so an entirely NSFW subreddit searches to zero hits without it. The plain
  * listings never filtered, so this defaults to on to keep search and feed
@@ -1360,6 +1389,7 @@ application.onGetCommunity = getCommunity;
 application.onGetCommunities = getCommunities;
 application.onGetComments = getComments;
 application.onGetUser = getUser;
+application.onGetDomain = getDomain;
 application.onSearch = search;
 application.onSearchCommunity = searchCommunity;
 application.onLogin = login;
