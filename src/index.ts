@@ -323,6 +323,15 @@ const USER_SORTS: SortOption[] = LISTING_SORTS.filter((s) => s.id !== "rising");
  * of them accept a time range. "confidence" is Reddit's id for what the site
  * labels "Best", and is the fallback default.
  */
+/**
+ * The only two sorts `/duplicates/` accepts. Most-commented first is what old
+ * Reddit's "other discussions" tab shows.
+ */
+const DUPLICATE_SORTS: SortOption[] = [
+  { id: "num_comments", displayName: "Most Comments" },
+  { id: "new", displayName: "New" },
+];
+
 const COMMENT_SORTS: SortOption[] = [
   { id: "confidence", displayName: "Best" },
   { id: "top", displayName: "Top" },
@@ -1035,6 +1044,47 @@ const getDomain = async (
 };
 
 /**
+ * Old Reddit's "other discussions": the other submissions of the same link,
+ * plus crossposts. `/duplicates/` answers like `/comments/`, a two-listing
+ * array of the original post and then the others.
+ */
+const getPostDuplicates = async (
+  request: GetPostDuplicatesRequest
+): Promise<GetPostDuplicatesResponse> => {
+  const { sort } = resolveSort(DUPLICATE_SORTS, request.sortId);
+  const url = new URL(
+    `${REDDIT_API_BASE}/duplicates/${encodeURIComponent(request.apiId)}.json`
+  );
+  url.searchParams.append("sort", sort.id);
+  if (request.pageInfo?.page) {
+    url.searchParams.append("after", String(request.pageInfo.page));
+  }
+  const response = await httpRequest(url.toString(), {
+    headers: getHeaders(),
+  });
+  const json = await readJson<CommentsResponse>(response, url.toString());
+  if (!Array.isArray(json) || !json[0]?.data?.children || !json[1]?.data) {
+    throw unexpectedShape(url.toString());
+  }
+  const original = json[0].data.children.find(
+    (c): c is ListingChildPost => c.kind === "t3"
+  );
+  const data = json[1].data;
+  return {
+    items: data.children
+      .filter((c): c is ListingChildPost => c.kind === "t3")
+      .map((c) => redditPostsToPost(c.data)),
+    post: original ? redditPostsToPost(original.data) : undefined,
+    pageInfo: {
+      nextPage: data.after ?? undefined,
+      prevPage: data.before ?? undefined,
+    },
+    sortOptions: DUPLICATE_SORTS,
+    sortId: sort.id,
+  };
+};
+
+/**
  * Reddit's search endpoints drop every over-18 post unless `include_over_18=on`,
  * so an entirely NSFW subreddit searches to zero hits without it. The plain
  * listings never filtered, so this defaults to on to keep search and feed
@@ -1390,6 +1440,7 @@ application.onGetCommunities = getCommunities;
 application.onGetComments = getComments;
 application.onGetUser = getUser;
 application.onGetDomain = getDomain;
+application.onGetPostDuplicates = getPostDuplicates;
 application.onSearch = search;
 application.onSearchCommunity = searchCommunity;
 application.onLogin = login;

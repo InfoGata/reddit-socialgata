@@ -26,6 +26,14 @@
       "path": "/post/:postId"
     },
     {
+      "pattern": "https://*.reddit.com/r/:community/duplicates/:postId{/*}?",
+      "path": "/c/:community/post/:postId/duplicates"
+    },
+    {
+      "pattern": "https://*.reddit.com/duplicates/:postId{/*}?",
+      "path": "/post/:postId/duplicates"
+    },
+    {
       "pattern": "https://*.reddit.com/r/:community{/*}?",
       "path": "/c/:community"
     },
