@@ -79,6 +79,28 @@ interface ListingChildSubreddit {
     url: string;
     title: string;
     over_18?: boolean;
+    /** Styled icon; often "" for subreddits that only have `icon_img` */
+    community_icon?: string;
+    icon_img?: string;
+  };
+}
+
+/** An account, as `/users/search` lists it */
+interface ListingChildUser {
+  kind: "t2";
+  data: {
+    name: string;
+    icon_img?: string;
+    link_karma?: number;
+    comment_karma?: number;
+    /** Suspended accounts come back with little more than a name */
+    is_suspended?: boolean;
+    /** The profile's own subreddit, which carries its bio and adult flag */
+    subreddit?: {
+      public_description?: string;
+      title?: string;
+      over_18?: boolean;
+    } | null;
   };
 }
 
@@ -111,6 +133,8 @@ interface ListingChildCommentData {
   link_id?: string;
   /** Fullname of the parent comment or post */
   parent_id?: string;
+  /** Title of the post, present on comments listed outside their thread */
+  link_title?: string;
   /** Images/gifs embedded in the body, referenced from `body`/`body_html`. */
   media_metadata?: Record<string, MediaMetadataEntry>;
 }
@@ -864,6 +888,12 @@ const redditCommentToPost = (comment: ListingChildCommentData): Post => {
     edited: comment.edited ? true : undefined,
     communityName: comment.subreddit,
     communityApiId: comment.subreddit,
+    // Only listings outside the thread (a user's history) carry `link_title`;
+    // inside a thread the post is already on screen.
+    postApiId: comment.link_title
+      ? comment.link_id?.replace(/^t3_/, "")
+      : undefined,
+    postTitle: comment.link_title || undefined,
     // Reddit's own comment permalink: the post page focused on this comment.
     originalUrl: comment.permalink
       ? `${REDDIT_PUBLIC_API_BASE}${comment.permalink}`
@@ -1241,6 +1271,33 @@ const getUser = async (request: GetUserRequest): Promise<GetUserResponse> => {
   };
 };
 
+const subredditToCommunity = (
+  sr: ListingChildSubreddit["data"]
+): Community => ({
+  apiId: sr.display_name,
+  name: sr.display_name,
+  description: sr.public_description || undefined,
+  originalUrl: `${REDDIT_PUBLIC_API_BASE}${sr.url}`,
+  nsfw: sr.over_18 || undefined,
+  iconUrl: sr.community_icon || sr.icon_img || undefined,
+  memberCount: sr.subscribers ?? undefined,
+});
+
+const redditUserToUser = (user: ListingChildUser["data"]): User => {
+  const karma =
+    user.link_karma !== undefined || user.comment_karma !== undefined
+      ? (user.link_karma ?? 0) + (user.comment_karma ?? 0)
+      : undefined;
+  return {
+    apiId: user.name,
+    name: user.name,
+    avatar: user.icon_img || undefined,
+    bio: user.subreddit?.public_description || undefined,
+    karma,
+    nsfw: user.subreddit?.over_18 || undefined,
+  };
+};
+
 const getCommunities = async (
   request: GetCommunitiesRequest
 ): Promise<GetCommunitiesResponse> => {
@@ -1260,13 +1317,7 @@ const getCommunities = async (
   }
   const items = json.data.children
     .filter((c: ListingChildSubreddit) => c.kind === "t5")
-    .map((c: ListingChildSubreddit) => ({
-      apiId: c.data.display_name,
-      name: c.data.display_name,
-      description: c.data.public_description,
-      originalUrl: `https://www.reddit.com${c.data.url}`,
-      nsfw: c.data.over_18 || undefined,
-    }));
+    .map((c: ListingChildSubreddit) => subredditToCommunity(c.data));
 
   return {
     items,
@@ -1277,17 +1328,97 @@ const getCommunities = async (
   };
 };
 
+/**
+ * Result types for site-wide search, shown as tabs. Comments are absent on
+ * purpose: the API ignores `type=comment` and answers with posts, since
+ * reddit.com's own comment search runs on its private GraphQL API.
+ */
+const SEARCH_TYPES: FeedType[] = [
+  { id: "link", displayName: "Posts" },
+  { id: "sr", displayName: "Subreddits" },
+  { id: "user", displayName: "Users" },
+];
+
+/**
+ * `/subreddits/search` and `/users/search` only rank by match or by recent
+ * activity, and take no time range.
+ */
+const ACCOUNT_SEARCH_SORTS: SortOption[] = [
+  { id: "relevance", displayName: "Relevance" },
+  { id: "activity", displayName: "Activity" },
+];
+
+/**
+ * Searches subreddits or users. Both endpoints answer with the usual listing
+ * envelope, of `t5` and `t2` children respectively.
+ */
+const searchAccounts = async (
+  request: SearchRequest,
+  typeId: "sr" | "user"
+): Promise<SearchResponse> => {
+  const { sort } = resolveSort(ACCOUNT_SEARCH_SORTS, request.sortId);
+  const path = typeId === "sr" ? "/subreddits/search.json" : "/users/search.json";
+  const url = new URL(`${REDDIT_API_BASE}${path}`);
+  url.searchParams.append("q", request.query);
+  url.searchParams.append("sort", sort.id);
+  await applyNsfwSearchParam(url);
+  if (request.pageInfo?.page) {
+    url.searchParams.append("after", String(request.pageInfo.page));
+  }
+
+  const response = await httpRequest(url.toString(), { headers: getHeaders() });
+  const json = await readJson<{ data?: ListingData }>(response, url.toString());
+  if (!json?.data?.children) {
+    throw unexpectedShape(url.toString());
+  }
+  const children = json.data.children as unknown as Array<
+    ListingChildSubreddit | ListingChildUser | { kind: string }
+  >;
+  // `include_over_18` is honoured by the subreddit search but not reliably by
+  // user search, so adult results are also dropped here when they're unwanted.
+  const allowNsfw = includeNsfwSearch() && (await hostAllowsNsfw());
+
+  const common = {
+    items: [],
+    pageInfo: {
+      nextPage: json.data.after ?? undefined,
+      prevPage: json.data.before ?? undefined,
+    },
+    feedTypes: SEARCH_TYPES,
+    feedTypeId: typeId,
+    sortOptions: ACCOUNT_SEARCH_SORTS,
+    sortId: sort.id,
+  };
+
+  if (typeId === "sr") {
+    const communities = children
+      .filter((c): c is ListingChildSubreddit => c.kind === "t5")
+      .map((c) => subredditToCommunity(c.data))
+      .filter((c) => allowNsfw || !c.nsfw);
+    return { ...common, communities };
+  }
+  const users = children
+    .filter((c): c is ListingChildUser => c.kind === "t2")
+    .filter((c) => !c.data.is_suspended)
+    .map((c) => redditUserToUser(c.data))
+    .filter((u) => allowNsfw || !u.nsfw);
+  return { ...common, users };
+};
+
 const search = async (request: SearchRequest): Promise<SearchResponse> => {
+  const typeId =
+    SEARCH_TYPES.find((t) => t.id === request.feedTypeId)?.id ?? "link";
+  if (typeId === "sr" || typeId === "user") {
+    return searchAccounts(request, typeId);
+  }
+
   const { sort, timeRangeId } = resolveSort(
     SEARCH_SORTS,
     request.sortId,
     request.timeRangeId
   );
 
-  const baseUrl = REDDIT_API_BASE;
-  const path = "/search.json";
-
-  const url = new URL(`${baseUrl}${path}`);
+  const url = new URL(`${REDDIT_API_BASE}/search.json`);
   url.searchParams.append("q", request.query);
   url.searchParams.append("type", "link");
   await applyNsfwSearchParam(url);
@@ -1301,6 +1432,8 @@ const search = async (request: SearchRequest): Promise<SearchResponse> => {
 
   return {
     ...(await fetchPostListing(url)),
+    feedTypes: SEARCH_TYPES,
+    feedTypeId: typeId,
     sortOptions: SEARCH_SORTS,
     sortId: sort.id,
     timeRangeId,
